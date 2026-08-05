@@ -3,7 +3,7 @@ import cors from 'cors';
 import { chromium } from 'playwright';
 import { resolveVimeosEmbed } from './resolvers/vimeos.js';
 import { resolveGoodstreamEmbed } from './resolvers/goodstream.js';
-const path = require('path');
+import path from 'path';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
