@@ -1,43 +1,31 @@
 // ═══════════════════════════════════════════════════════════════
 // REPRODUCTOR MULTI-SERVIDOR HLS
-// Soporta: Vimeos, GoodStream, y cualquier servidor compatible
-// file:///C:/Users/Ands/Desktop/wrapper/api-resolved-vimeos/web-singler/index.html?embed=https://vimeos.net/embed-xkal207cf3kx.html
-// file:///C:/Users/Ands/Desktop/wrapper/api-resolved-vimeos/web-singler/index.html?embed=https://goodstream.one/embed-810ef948gg9q.html&title=Mi%20Película
+// Soporta: Vimeos (proxy HLS), GoodStream (iframe directo)
 // ═══════════════════════════════════════════════════════════════
 
 (function () {
   'use strict';
 
-  // ═══════════════════════════════════════════════════════════════
-  // CONFIGURACIÓN DE SERVIDORES
-  // ═══════════════════════════════════════════════════════════════
   const RESOLVER_API = 'https://server-api-resolved-video.onrender.com';
-  //'http://localhost:3000';
-  // Para producción, cambia a tu dominio:
-  // const RESOLVER_API = 'https://server-api-resolved-video.onrender.com';
 
-  // Detecta qué servidor es según la URL del embed
+  // Detecta servidor y modo de reproducción
   function detectServer(url) {
     if (!url) return null;
-    if (url.includes('vimeos')) return { name: 'vimeos', resolver: '/api/resolve-playwright' };
-    if (url.includes('goodstream')) return { name: 'goodstream', resolver: '/api/resolve-playwright' };
-    // Agrega más servidores aquí:
-    // if (url.includes('otroserver')) return { name: 'otroserver', resolver: '/api/resolve-otros' };
+    if (url.includes('vimeos')) return { name: 'vimeos', resolver: '/api/resolve-playwright', iframeMode: false };
+    if (url.includes('goodstream')) return { name: 'goodstream', resolver: '/api/resolve-playwright', iframeMode: true };
     return null;
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  // PARÁMETROS DE URL
-  // ═══════════════════════════════════════════════════════════════
   const params = new URLSearchParams(location.search);
   const EMBED_URL = params.get('embed');
   const DIRECT_SRC = params.get('src');
   const VIDEO_TITLE = params.get('title') || 'Reproduciendo';
 
   // ═══════════════════════════════════════════════════════════════
-  // REFERENCIAS DOM
+  // DOM REFS
   // ═══════════════════════════════════════════════════════════════
   const video = document.getElementById('video');
+  const playerContainer = document.getElementById('player-container');
   const loadingOverlay = document.getElementById('loading-overlay');
   const loadingText = document.getElementById('loading-text');
   const loadingSubtext = document.getElementById('loading-subtext');
@@ -89,9 +77,10 @@
   let isSeeking = false;
   let seekDebounceTimer = null;
   let currentSource = null;
+  let iframePlayer = null;  // ← Referencia al iframe de GoodStream
 
   // ═══════════════════════════════════════════════════════════════
-  // TOAST NOTIFICATIONS
+  // TOAST
   // ═══════════════════════════════════════════════════════════════
   function showToast(msg, type) {
     toast.textContent = msg;
@@ -101,7 +90,7 @@
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // AJUSTES DE VIDEO (filtros CSS)
+  // VIDEO SETTINGS (filtros CSS)
   // ═══════════════════════════════════════════════════════════════
   const videoSettings = {
     brightness: 100, contrast: 100, saturate: 100,
@@ -162,7 +151,6 @@
     showToast('Preset: ' + name);
   }
 
-  // Eventos sliders
   document.querySelectorAll('.slider-track').forEach(track => {
     const setting = track.dataset.setting;
     const min = parseFloat(track.dataset.min);
@@ -190,14 +178,12 @@
     btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
   });
 
-// ═══════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════
   // RESOLUCIÓN DE EMBED VIA API
   // ═══════════════════════════════════════════════════════════════
   async function resolveEmbed(embedUrl) {
     const server = detectServer(embedUrl);
-    if (!server) {
-      throw new Error('Servidor no soportado: ' + embedUrl);
-    }
+    if (!server) throw new Error('Servidor no soportado: ' + embedUrl);
 
     showLoading('Resolviendo stream...');
     loadingSubtext.textContent = 'Servidor: ' + server.name;
@@ -208,23 +194,84 @@
       const res = await fetch(resolverUrl);
       if (!res.ok) throw new Error('API ' + res.status);
       const data = await res.json();
-
       if (!data.url) throw new Error('No se pudo resolver el stream');
 
       return {
         title: VIDEO_TITLE,
         type: 'hls',
-        url: data.url,           // ← Esta URL ya incluye cookies en el query param
+        url: data.url,
         rawUrl: data.rawUrl || data.url,
-        cookies: data.cookies || '',  // ← GUARDAR COOKIES (por si las necesitas luego)
         tracks: data.tracks || [],
         audioTracks: data.audioTracks || [],
-        serverName: server.name
+        serverName: server.name,
+        iframeMode: server.iframeMode
       };
     } catch (err) {
       console.error('Error resolviendo:', err);
       throw err;
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // IFRAME DIRECTO PARA GOODSTREAM
+  // ═══════════════════════════════════════════════════════════════
+  function showGoodstreamIframe(embedUrl) {
+    hideLoading();
+    hideError();
+
+    // Ocultar video nativo y controles personalizados
+    video.style.display = 'none';
+    controlsOverlay.style.display = 'none';
+    progressTrack.parentElement.style.display = 'none';
+    document.getElementById('bottom-controls').style.display = 'none';
+
+    // Limpiar iframe anterior si existe
+    if (iframePlayer) {
+      iframePlayer.remove();
+      iframePlayer = null;
+    }
+
+    // Crear contenedor para el iframe
+    const iframeContainer = document.createElement('div');
+    iframeContainer.id = 'iframe-player';
+    iframeContainer.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;background:#000;';
+
+    // Crear iframe con el embed de GoodStream
+    iframePlayer = document.createElement('iframe');
+    iframePlayer.src = embedUrl;
+    iframePlayer.style.cssText = 'width:100%;height:100%;border:none;';
+    iframePlayer.allow = 'fullscreen; autoplay; encrypted-media';
+    iframePlayer.setAttribute('allowfullscreen', '');
+    iframePlayer.setAttribute('webkitallowfullscreen', '');
+    iframePlayer.setAttribute('mozallowfullscreen', '');
+
+    iframeContainer.appendChild(iframePlayer);
+    playerContainer.appendChild(iframeContainer);
+
+    // Mostrar badge de servidor
+    serverBadge.textContent = 'GOODSTREAM';
+    qualityBadge.textContent = 'EMBED';
+
+    showToast('GoodStream: Reproducción directa');
+    console.log('[GoodStream] iframe cargado:', embedUrl);
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // LIMPIAR IFRAME (cuando se cambia de video)
+  // ═══════════════════════════════════════════════════════════════
+  function cleanupIframe() {
+    if (iframePlayer) {
+      iframePlayer.remove();
+      iframePlayer = null;
+    }
+    const oldContainer = document.getElementById('iframe-player');
+    if (oldContainer) oldContainer.remove();
+
+    // Restaurar video nativo y controles
+    video.style.display = '';
+    controlsOverlay.style.display = '';
+    progressTrack.parentElement.style.display = '';
+    document.getElementById('bottom-controls').style.display = '';
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -235,21 +282,21 @@
     showLoading('Iniciando...');
     hideError();
     resetVideoSettings();
+    cleanupIframe(); // Limpiar iframe anterior
 
     let source;
 
     try {
       if (DIRECT_SRC) {
-        // URL HLS directa (ya resuelta)
         source = {
           title: VIDEO_TITLE,
           type: 'hls',
           url: DIRECT_SRC,
           tracks: [],
-          serverName: 'direct'
+          serverName: 'direct',
+          iframeMode: false
         };
       } else if (EMBED_URL) {
-        // Resolver embed via API
         source = await resolveEmbed(EMBED_URL);
       } else {
         throw new Error('No se proporcionó URL. Usa ?embed= o ?src=');
@@ -259,12 +306,18 @@
       return;
     }
 
+    // Si es GoodStream, mostrar iframe directo
+    if (source.iframeMode) {
+      showGoodstreamIframe(EMBED_URL);
+      return;
+    }
+
     currentSource = source;
     loadSource(source);
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // CARGAR FUENTE HLS
+  // CARGAR FUENTE HLS (Vimeos y otros)
   // ═══════════════════════════════════════════════════════════════
   function loadSource(source) {
     showLoading('Cargando stream HLS...');
@@ -350,15 +403,8 @@
         showError('Dispositivo no soporta HLS.');
         return;
       }
-    } else {
-      video.src = source.url;
-      video.addEventListener('loadedmetadata', () => {
-        hideLoading();
-        video.play().catch(() => {});
-      }, { once: true });
     }
 
-    // Mostrar nombre del servidor
     if (source.serverName) {
       serverBadge.textContent = source.serverName.toUpperCase();
     }
@@ -391,7 +437,7 @@
   errorRetryBtn.addEventListener('click', () => initPlayer());
 
   // ═══════════════════════════════════════════════════════════════
-  // SUBTÍTULOS (con proxy CORS)
+  // SUBTÍTULOS
   // ═══════════════════════════════════════════════════════════════
   async function setupSubtitles(tracks) {
     Array.from(video.querySelectorAll('track')).forEach(t => {
@@ -399,14 +445,11 @@
       t.remove();
     });
     subtitleOptions.innerHTML = '';
-
     addSubtitleOption('Desactivado', null, true);
 
     for (let i = 0; i < tracks.length; i++) {
       const t = tracks[i];
-      if (!t.file || t.file.includes('empty.srt') || t.file.includes('/srt/empty')) {
-        continue;
-      }
+      if (!t.file || t.file.includes('empty.srt') || t.file.includes('/srt/empty')) continue;
 
       const trackEl = document.createElement('track');
       trackEl.kind = 'subtitles';
@@ -415,10 +458,7 @@
       trackEl.id = `track-${i}`;
 
       try {
-        // ═══════════════════════════════════════════════════════════════
-        // INCLUIR COOKIES EN EL PROXY DE SUBTÍTULOS
-        // ═══════════════════════════════════════════════════════════════
-        const proxyUrl = `${RESOLVER_API}/api/stream?url=${encodeURIComponent(t.file)}&referer=${encodeURIComponent(EMBED_URL)}&cookies=${encodeURIComponent(currentSource?.cookies || '')}`;
+        const proxyUrl = `${RESOLVER_API}/api/stream?url=${encodeURIComponent(t.file)}&referer=${encodeURIComponent(EMBED_URL || '')}&cookies=${encodeURIComponent(currentSource?.cookies || '')}`;
         const res = await fetch(proxyUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const vttText = await res.text();
@@ -488,7 +528,7 @@
   btnSubtitles.addEventListener('click', toggleSubtitleMenu);
 
   // ═══════════════════════════════════════════════════════════════
-  // PISTAS DE AUDIO (HLS.js)
+  // PISTAS DE AUDIO
   // ═══════════════════════════════════════════════════════════════
   function setupAudioTracks(hlsInstance) {
     const tracks = hlsInstance.audioTracks || [];
@@ -622,7 +662,6 @@
     }
   });
 
-  // Progress bar con debounce
   progressTrack.addEventListener('click', (e) => {
     const rect = progressTrack.getBoundingClientRect();
     const pct = (e.clientX - rect.left) / rect.width;
@@ -672,6 +711,16 @@
   // PANTALLA COMPLETA
   // ═══════════════════════════════════════════════════════════════
   btnFullscreen.addEventListener('click', () => {
+    if (iframePlayer) {
+      // Si es iframe, intentar fullscreen del iframe
+      const iframeDoc = iframePlayer.contentDocument || iframePlayer.contentWindow?.document;
+      if (iframeDoc?.fullscreenElement) {
+        iframeDoc.exitFullscreen();
+      } else {
+        iframePlayer.requestFullscreen();
+      }
+      return;
+    }
     const el = document.getElementById('player-container');
     if (!document.fullscreenElement) {
       (el.requestFullscreen || el.webkitRequestFullscreen || function(){}).call(el);
