@@ -9,5 +9,4 @@ COPY . .
 
 EXPOSE 3000
 
-# Tu servidor Express
 CMD ["node", "server.js"]
