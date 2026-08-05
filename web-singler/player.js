@@ -416,6 +416,10 @@
 
       // Intentar cargar via proxy CORS
       try {
+        const headers = {};
+
+
+
         const proxyUrl = `${RESOLVER_API}/api/stream?url=${encodeURIComponent(t.file)}`;
         const res = await fetch(proxyUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);

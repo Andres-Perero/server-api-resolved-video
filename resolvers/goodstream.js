@@ -16,6 +16,8 @@ export const GOODSTREAM_BLOCKED_PATTERNS = [
 
 export async function resolveGoodstreamEmbed(context, embedUrl) {
   const page = await context.newPage();
+  const cookies = await context.cookies();
+const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
   const hlsHits = [];
 
   await page.route('**/*', (route) => {
@@ -88,6 +90,7 @@ export async function resolveGoodstreamEmbed(context, embedUrl) {
       url: finalUrl,
       tracks: mediaData.tracks,
       audioTracks: mediaData.audioTracks,
+      cookies: cookieString,  // ← nuevo campo
       referer: refererHost,
       resolvedAt: new Date().toISOString()
     };
