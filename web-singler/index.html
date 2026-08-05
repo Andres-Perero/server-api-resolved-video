@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reproductor Multi-Servidor</title>
+<link rel="stylesheet" href="style.css">
+<base target="_blank">
+</head>
+<body>
+
+<div id="player-container">
+  <div id="video-wrapper">
+    <video id="video" playsinline crossorigin="anonymous"></video>
+  </div>
+
+  <!-- Carga -->
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <p id="loading-text">Cargando video...</p>
+    <p id="loading-subtext"></p>
+  </div>
+
+  <!-- Búsqueda activa -->
+  <div id="seeking-overlay">
+    <div class="seeking-spinner"></div>
+    <p>Buscando...</p>
+  </div>
+
+  <!-- Error -->
+  <div id="error-overlay">
+    <div class="error-icon">⚠️</div>
+    <h2>No se pudo reproducir el video</h2>
+    <p id="error-detail">El servidor no respondió. Intenta con otro servidor o vuelve a intentarlo.</p>
+    <button id="error-retry-btn" class="focusable">Reintentar</button>
+  </div>
+
+  <!-- Flash de salto -->
+  <div id="seek-flash"></div>
+
+  <!-- Toast -->
+  <div id="toast"></div>
+
+  <!-- Controles -->
+  <div id="controls-overlay">
+    <div id="top-bar">
+      <span id="video-title">Cargando título...</span>
+      <div id="video-info">
+        <span class="server-badge" id="server-badge">AUTO</span>
+        <span class="quality-badge" id="quality-badge">AUTO</span>
+      </div>
+    </div>
+
+    <div id="center-controls">
+      <button id="btn-rewind" class="center-btn focusable" title="Retroceder 10s">⏪</button>
+      <button id="btn-play-pause" class="center-btn focusable" title="Reproducir / Pausar">▶</button>
+      <button id="btn-forward" class="center-btn focusable" title="Adelantar 10s">⏩</button>
+    </div>
+
+    <div id="bottom-bar">
+      <div id="progress-row">
+        <span id="time-current">0:00</span>
+        <div id="progress-track" class="focusable" tabindex="0">
+          <div id="progress-tooltip"></div>
+          <div id="progress-buffered"></div>
+          <div id="progress-fill"></div>
+          <div id="progress-thumb"></div>
+        </div>
+        <span id="time-duration">0:00</span>
+      </div>
+
+      <div id="buttons-row">
+        <button id="btn-play-pause-2" class="icon-btn focusable">
+          <span class="icon" id="play-pause-icon-2">▶</span><span>Reproducir</span>
+        </button>
+
+        <div id="volume-row">
+          <button id="btn-mute" class="icon-btn focusable"><span class="icon" id="volume-icon">🔊</span></button>
+          <div id="volume-track" class="focusable" tabindex="0"><div id="volume-fill"></div></div>
+        </div>
+
+        <div class="spacer"></div>
+
+        <button id="btn-audio-track" class="icon-btn focusable">
+          <span class="icon">🎧</span><span>Audio</span>
+        </button>
+
+        <button id="btn-subtitles" class="icon-btn focusable">
+          <span class="icon">💬</span><span>Subtítulos</span>
+        </button>
+
+        <button id="btn-video-settings" class="icon-btn focusable">
+          <span class="icon">🎨</span><span>Ajustes</span>
+        </button>
+
+        <button id="btn-fullscreen" class="icon-btn focusable">
+          <span class="icon">⛶</span><span>Pantalla completa</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Menú de pista de audio -->
+  <div id="audio-menu" class="dropdown-menu">
+    <h3>🎧 Audio</h3>
+    <div id="audio-options"></div>
+  </div>
+
+  <!-- Menú de subtítulos -->
+  <div id="subtitle-menu" class="dropdown-menu">
+    <h3>💬 Subtítulos</h3>
+    <div id="subtitle-options"></div>
+  </div>
+
+  <!-- Menú de Ajustes de Video -->
+  <div id="video-settings-menu" class="dropdown-menu">
+    <h3>🎨 Ajustes de Video</h3>
+
+    <div class="slider-control">
+      <label>Brillo <span class="value" id="brightness-val">100%</span></label>
+      <div class="slider-track" id="brightness-track" data-setting="brightness" data-min="0" data-max="200" data-default="100">
+        <div class="slider-fill" style="width:50%"></div>
+        <div class="slider-thumb" style="left:50%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Contraste <span class="value" id="contrast-val">100%</span></label>
+      <div class="slider-track" id="contrast-track" data-setting="contrast" data-min="0" data-max="200" data-default="100">
+        <div class="slider-fill" style="width:50%"></div>
+        <div class="slider-thumb" style="left:50%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Saturación <span class="value" id="saturate-val">100%</span></label>
+      <div class="slider-track" id="saturate-track" data-setting="saturate" data-min="0" data-max="200" data-default="100">
+        <div class="slider-fill" style="width:50%"></div>
+        <div class="slider-thumb" style="left:50%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Tono (Hue) <span class="value" id="hue-val">0°</span></label>
+      <div class="slider-track" id="hue-track" data-setting="hue-rotate" data-min="-180" data-max="180" data-default="0">
+        <div class="slider-fill" style="width:50%"></div>
+        <div class="slider-thumb" style="left:50%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Sepia <span class="value" id="sepia-val">0%</span></label>
+      <div class="slider-track" id="sepia-track" data-setting="sepia" data-min="0" data-max="100" data-default="0">
+        <div class="slider-fill" style="width:0%"></div>
+        <div class="slider-thumb" style="left:0%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Escala de Grises <span class="value" id="grayscale-val">0%</span></label>
+      <div class="slider-track" id="grayscale-track" data-setting="grayscale" data-min="0" data-max="100" data-default="0">
+        <div class="slider-fill" style="width:0%"></div>
+        <div class="slider-thumb" style="left:0%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Invertir <span class="value" id="invert-val">0%</span></label>
+      <div class="slider-track" id="invert-track" data-setting="invert" data-min="0" data-max="100" data-default="0">
+        <div class="slider-fill" style="width:0%"></div>
+        <div class="slider-thumb" style="left:0%"></div>
+      </div>
+    </div>
+
+    <div class="settings-divider"></div>
+
+    <div style="padding:0 14px;">
+      <div class="preset-btn focusable" id="btn-reset-video">↺ Restaurar valores por defecto</div>
+    </div>
+
+    <div style="padding:0 14px; margin-top:8px;">
+      <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">Presets rápidos:</div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <div class="preset-btn focusable" data-preset="cinema" style="flex:1; font-size:13px; padding:6px;">🎬 Cine</div>
+        <div class="preset-btn focusable" data-preset="warm" style="flex:1; font-size:13px; padding:6px;">☀️ Cálido</div>
+        <div class="preset-btn focusable" data-preset="cool" style="flex:1; font-size:13px; padding:6px;">❄️ Frío</div>
+        <div class="preset-btn focusable" data-preset="bw" style="flex:1; font-size:13px; padding:6px;">⚫ B/N</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hint">
+    <span>⬅➡ Retroceder/Adelantar</span>
+    <span>⬆⬇ Navegar</span>
+    <span>OK Seleccionar</span>
+    <span>↩ Volver</span>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script src="player.js"></script>
+</body>
+</html>

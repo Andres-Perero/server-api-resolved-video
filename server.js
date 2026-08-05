@@ -7,14 +7,15 @@ import { resolveGoodstreamEmbed } from './resolvers/goodstream.js';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// CORS para tu dominio específico (o '*' para desarrollo)
 app.use(cors({
-  origin: '*',  // ← CRÍTICO: permite cualquier origen
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Range'],
-  exposedHeaders: ['Content-Length', 'Content-Range']
+    origin: '*', // En producción pon tu dominio exacto
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
-
-app.use(express.json());
+// Sirve archivos estáticos desde la carpeta web-singler/
+app.use(express.static(path.join(__dirname, 'web-singler')));
+//app.use(express.json());
 
 let browser;
 
@@ -228,6 +229,10 @@ app.get('/api/extract-voe', async (req, res) => {
     }
 });
 
+// Sirve index.html para cualquier ruta no-API (SPA behavior)
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'web-singler', 'index.html'));
+});
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor activo en el puerto ${PORT}`);
 });
