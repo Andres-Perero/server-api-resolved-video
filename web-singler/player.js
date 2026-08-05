@@ -190,7 +190,7 @@
     btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
   });
 
-  // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
   // RESOLUCIÓN DE EMBED VIA API
   // ═══════════════════════════════════════════════════════════════
   async function resolveEmbed(embedUrl) {
@@ -214,8 +214,9 @@
       return {
         title: VIDEO_TITLE,
         type: 'hls',
-        url: data.url,
+        url: data.url,           // ← Esta URL ya incluye cookies en el query param
         rawUrl: data.rawUrl || data.url,
+        cookies: data.cookies || '',  // ← GUARDAR COOKIES (por si las necesitas luego)
         tracks: data.tracks || [],
         audioTracks: data.audioTracks || [],
         serverName: server.name
@@ -403,7 +404,6 @@
 
     for (let i = 0; i < tracks.length; i++) {
       const t = tracks[i];
-      // Ignorar tracks vacíos o de upload
       if (!t.file || t.file.includes('empty.srt') || t.file.includes('/srt/empty')) {
         continue;
       }
@@ -414,13 +414,11 @@
       trackEl.srclang = t.lang || 'es';
       trackEl.id = `track-${i}`;
 
-      // Intentar cargar via proxy CORS
       try {
-        const headers = {};
-
-
-
-        const proxyUrl = `${RESOLVER_API}/api/stream?url=${encodeURIComponent(t.file)}`;
+        // ═══════════════════════════════════════════════════════════════
+        // INCLUIR COOKIES EN EL PROXY DE SUBTÍTULOS
+        // ═══════════════════════════════════════════════════════════════
+        const proxyUrl = `${RESOLVER_API}/api/stream?url=${encodeURIComponent(t.file)}&referer=${encodeURIComponent(EMBED_URL)}&cookies=${encodeURIComponent(currentSource?.cookies || '')}`;
         const res = await fetch(proxyUrl);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const vttText = await res.text();
@@ -429,7 +427,7 @@
         console.log('[SUBTITLE OK]', t.label);
       } catch (err) {
         console.warn('[SUBTITLE FALLBACK]', t.label, err.message);
-        trackEl.src = t.file; // fallback directo
+        trackEl.src = t.file;
       }
 
       trackEl.addEventListener('error', () => {

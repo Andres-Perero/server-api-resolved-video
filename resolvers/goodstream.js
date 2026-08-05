@@ -16,8 +16,7 @@ export const GOODSTREAM_BLOCKED_PATTERNS = [
 
 export async function resolveGoodstreamEmbed(context, embedUrl) {
   const page = await context.newPage();
-  const cookies = await context.cookies();
-const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
   const hlsHits = [];
 
   await page.route('**/*', (route) => {
@@ -82,6 +81,25 @@ const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
       return null;
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // EXTRAER COOKIES DEL CONTEXTO DE PLAYWRIGHT
+    // ═══════════════════════════════════════════════════════════════
+    const allCookies = await context.cookies();
+    const goodstreamCookies = allCookies
+      .filter(c => {
+        // Filtrar cookies relevantes para goodstream y sus CDNs
+        const domain = c.domain.toLowerCase();
+        return domain.includes('goodstream') || 
+               domain.includes('enc') ||
+               domain.includes('s1.') ||
+               domain.includes('s2.') ||
+               domain.includes('s3.');
+      })
+      .map(c => `${c.name}=${c.value}`)
+      .join('; ');
+
+    console.log('Cookies capturadas:', goodstreamCookies.substring(0, 200) + '...');
+
     const parsedEmbed = new URL(embedUrl);
     const refererHost = `${parsedEmbed.protocol}//${parsedEmbed.host}/`;
 
@@ -90,7 +108,7 @@ const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
       url: finalUrl,
       tracks: mediaData.tracks,
       audioTracks: mediaData.audioTracks,
-      cookies: cookieString,  // ← nuevo campo
+      cookies: goodstreamCookies,  // ← PASAR COOKIES
       referer: refererHost,
       resolvedAt: new Date().toISOString()
     };
