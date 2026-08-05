@@ -28,10 +28,10 @@ export const VIMEOS_BLOCKED_PATTERNS = [
 ];
 
 /**
- * Resuelve un embed de vimeos.net y devuelve el .m3u8 real + subtítulos.
+ * Resuelve un embed de vimeos.net y devuelve el .m3u8 real + subtítulos + audios.
  * @param {import('playwright').BrowserContext} context
  * @param {string} embedUrl - ej: https://vimeos.net/embed-xkal207cf3kx.html
- * @returns {Promise<{type:'hls', url:string, tracks:Array, resolvedAt:string}|null>}
+ * @returns {Promise<{type:'hls', url:string, tracks:Array, audioTracks:Array, referer:string, resolvedAt:string}|null>}
  */
 export async function resolveVimeosEmbed(context, embedUrl) {
   const page = await context.newPage();
@@ -74,7 +74,7 @@ export async function resolveVimeosEmbed(context, embedUrl) {
     await page.waitForFunction(
       () => {
         try {
-          return typeof jwplayer === 'function' && jwplayer().getPlaylist?.()?.[0]?.sources?.[0]?.file;
+          return typeof jwplayer === 'function' && jwplayer().getConfig?.();
         } catch {
           return false;
         }
@@ -82,33 +82,53 @@ export async function resolveVimeosEmbed(context, embedUrl) {
       { timeout: 10_000 }
     ).catch(() => {});
 
-    // Preferimos leer directo del config de jwplayer (más confiable que
-    // esperar a que la red dispare la petición, que puede tardar según buffering)
-    const jwSource = await page.evaluate(() => {
+    // Extrae metadatos directamente del cliente JWPlayer
+    const mediaData = await page.evaluate(() => {
       try {
-        const playlist = jwplayer().getPlaylist();
-        const item = playlist?.[0];
-        return {
-          file: item?.sources?.[0]?.file || null,
-          tracks: (item?.tracks || [])
-            .filter((t) => t.kind === 'captions')
-            .map((t) => ({ label: t.label, file: t.file }))
-        };
-      } catch {
-        return { file: null, tracks: [] };
-      }
-    }).catch(() => ({ file: null, tracks: [] }));
+        const player = jwplayer();
+        const config = player.getConfig?.() || {};
+        const playlist = player.getPlaylist?.()?.[0] || {};
 
-    const finalUrl = jwSource.file || hlsHits[0] || null;
+        // Extrae Subtítulos buscando tanto en playlist como en la config global
+        const rawTracks = playlist.tracks || config.tracks || [];
+        const tracks = rawTracks
+          .filter((t) => t.kind === 'captions' || t.kind === 'subtitles')
+          .map((t) => ({
+            label: t.label || 'Unknown',
+            file: t.file
+          }));
+
+        // Extrae las pistas de Audio (si existen)
+        const audioTracks = (player.getAudioTracks?.() || []).map((a) => ({
+          id: a.id,
+          label: a.name || a.label
+        }));
+
+        // Extrae la URL del stream principal
+        const file = playlist.sources?.[0]?.file || config.sources?.[0]?.file || null;
+
+        return { file, tracks, audioTracks };
+      } catch {
+        return { file: null, tracks: [], audioTracks: [] };
+      }
+    }).catch(() => ({ file: null, tracks: [], audioTracks: [] }));
+
+    const finalUrl = mediaData.file || hlsHits[0] || null;
 
     if (!finalUrl) {
       return null;
     }
 
+    // Extrae el Referer dinámico del host enviado
+    const parsedEmbed = new URL(embedUrl);
+    const refererHost = `${parsedEmbed.protocol}//${parsedEmbed.host}/`;
+
     return {
       type: 'hls',
       url: finalUrl,
-      tracks: jwSource.tracks,
+      tracks: mediaData.tracks,
+      audioTracks: mediaData.audioTracks,
+      referer: refererHost,
       resolvedAt: new Date().toISOString()
     };
   } finally {

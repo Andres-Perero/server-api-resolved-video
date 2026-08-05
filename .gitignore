@@ -1,3 +1,9 @@
 node_modules/
+
 .env
 .env.local
+
+
+web-singler/
+diagnose-jessicachoosemake.js
+extract-voe.js
