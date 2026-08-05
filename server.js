@@ -54,8 +54,7 @@ res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
       result = await resolveVimeosEmbed(context, embedUrl);
     }
 if (result && result.url) {
-      const proxiedStreamUrl = `${req.protocol}://${req.get('host')}/api/stream?url=${encodeURIComponent(result.url)}&referer=${encodeURIComponent(refererHost)}`;
-
+const proxiedStreamUrl = `https://${req.get('host')}/api/stream?url=${encodeURIComponent(result.url)}&referer=${encodeURIComponent(refererHost)}`;
       return res.json({
         type: result.type,
         url: proxiedStreamUrl, // URL proxificada para hls.js
@@ -105,8 +104,8 @@ res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
   // Reescritura del manifiesto m3u8
 if (targetUrl.includes('.m3u8')) {
   let text = new TextDecoder().decode(data);
-  const hostUrl = `${req.protocol}://${req.get('host')}/api/stream?referer=${encodeURIComponent(customReferer)}&url=`;
-
+  //const hostUrl = `${req.protocol}://${req.get('host')}/api/stream?referer=${encodeURIComponent(customReferer)}&url=`;
+const hostUrl = `https://${req.get('host')}/api/stream?referer=${encodeURIComponent(customReferer)}&url=`;
   // Obtener la URL base del archivo m3u8 para resolver URLs relativas
   const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
 
