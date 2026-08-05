@@ -8,4 +8,4 @@ RUN npm install
 COPY . .
 
 EXPOSE 3000
-CMD ["node", "/src/index.js"] # Tu servidor Express/Fastify
+CMD ["node", "server.js"] # Tu servidor Express/Fastify
