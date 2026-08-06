@@ -196,16 +196,17 @@
       const data = await res.json();
       if (!data.url) throw new Error('No se pudo resolver el stream');
 
-      return {
-        title: VIDEO_TITLE,
-        type: 'hls',
-        url: data.url,
-        rawUrl: data.rawUrl || data.url,
-        tracks: data.tracks || [],
-        audioTracks: data.audioTracks || [],
-        serverName: server.name,
-        iframeMode: server.iframeMode
-      };
+      // En resolveEmbed, guardar sessionId
+return {
+  title: VIDEO_TITLE,
+  type: 'hls',
+  url: data.url,        // Ahora es /api/stream-proxy?session=...
+  rawUrl: data.rawUrl,
+  tracks: data.tracks || [],
+  sessionId: data.sessionId,  // ← Guardar
+  serverName: server.name,
+  iframeMode: false  // Ahora usamos proxy de nuevo, pero via Playwright
+};
     } catch (err) {
       console.error('Error resolviendo:', err);
       throw err;

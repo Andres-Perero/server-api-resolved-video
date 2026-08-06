@@ -12,242 +12,211 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-);
-
-// Sirve archivos estáticos desde la carpeta web-singler/
+app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["Content-Type", "Authorization"] }));
 app.use(express.static(path.join(__dirname, "web-singler")));
 
-let browser;
+// ═══════════════════════════════════════════════════════════════
+// SESIONES DE PLAYWRIGHT PERSISTENTES
+// Cada sesión = un navegador abierto con su propia IP/contexto
+// ═══════════════════════════════════════════════════════════════
+const sessions = new Map(); // sessionId → { context, page, lastUsed }
+
+// Limpiar sesiones inactivas cada 5 minutos
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions.entries()) {
+    if (now - session.lastUsed > 10 * 60 * 1000) { // 10 minutos
+      session.context.close().catch(() => {});
+      sessions.delete(id);
+      console.log(`[SESSION] Eliminada sesión inactiva: ${id}`);
+    }
+  }
+}, 5 * 60 * 1000);
+
+// Crear nueva sesión de Playwright
+async function createSession(sessionId, embedUrl) {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    locale: "es-ES",
+    viewport: { width: 1280, height: 720 }
+  });
+
+  const page = await context.newPage();
+
+  // Bloquear ads y trackers
+  await page.route('**/*', (route) => {
+    const url = route.request().url();
+    const blocked = ['ads', 'analytics', 'googletag', 'doubleclick', 'facebook', 'twitter'];
+    if (blocked.some(b => url.includes(b))) {
+      return route.abort();
+    }
+    return route.continue();
+  });
+
+  // Navegar al embed y esperar que JWPlayer cargue
+  await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+  await page.waitForTimeout(3000);
+
+  // Esperar JWPlayer
+  await page.waitForFunction(
+    () => typeof window.jwplayer === 'function',
+    { timeout: 10000 }
+  ).catch(() => {});
+
+  sessions.set(sessionId, { browser, context, page, embedUrl, lastUsed: Date.now() });
+  return sessions.get(sessionId);
+}
 
 // ═══════════════════════════════════════════════════════════════
-// 1. Endpoint dinámico con Playwright
+// RESOLVER EMBED (crea sesión y devuelve sessionId)
 // ═══════════════════════════════════════════════════════════════
 app.get("/api/resolve-playwright", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
-  res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range");
-
   const embedUrl = req.query.url;
-  if (!embedUrl) {
-    return res.status(400).json({ error: 'Parámetro "url" requerido (?url=...)' });
-  }
+  if (!embedUrl) return res.status(400).json({ error: 'Parámetro "url" requerido' });
 
   try {
-    if (!browser) {
-      browser = await chromium.launch({ headless: true });
-    }
+    const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2);
 
-    const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      locale: "es-ES",
-    });
-
-    let result = null;
-    let refererHost = "https://vimeos.net/";
-
-    // Selección de resolver según el dominio
     if (embedUrl.includes("goodstream.one")) {
-      result = await resolveGoodstreamEmbed(context, embedUrl);
-      if (result?.referer) refererHost = result.referer;
-    } else {
-      result = await resolveVimeosEmbed(context, embedUrl);
-    }
+      // Crear sesión persistente para GoodStream
+      const session = await createSession(sessionId, embedUrl);
 
-    if (result && result.url) {
-      // ═══════════════════════════════════════════════════════════════
-      // INCLUIR COOKIES EN LA URL DEL PROXY
-      // ═══════════════════════════════════════════════════════════════
-      const proxiedStreamUrl = `https://${req.get('host')}/api/stream?url=${encodeURIComponent(result.url)}&referer=${encodeURIComponent(refererHost)}&cookies=${encodeURIComponent(result.cookies || '')}`;
+      // Extraer datos del JWPlayer
+      const mediaData = await session.page.evaluate(() => {
+        try {
+          const player = window.jwplayer();
+          const config = player.getConfig?.() || {};
+          const playlist = player.getPlaylist?.()?.[0] || {};
+
+          const tracks = (playlist.tracks || config.tracks || [])
+            .filter(t => t.kind === 'captions' || t.kind === 'subtitles')
+            .map(t => ({ label: t.label || 'Unknown', file: t.file }));
+
+          const file = playlist.sources?.[0]?.file || config.sources?.[0]?.file || null;
+
+          return { file, tracks };
+        } catch (e) {
+          return { file: null, tracks: [] };
+        }
+      });
+
+      if (!mediaData.file) {
+        await session.context.close();
+        sessions.delete(sessionId);
+        return res.status(404).json({ error: "No se pudo resolver el stream" });
+      }
+
+      // URL del proxy que usa la sesión de Playwright
+      const proxyUrl = `https://${req.get('host')}/api/stream-proxy?session=${sessionId}&url=`;
 
       return res.json({
-        type: result.type,
-        url: proxiedStreamUrl,
+        type: 'hls',
+        url: proxyUrl + encodeURIComponent(mediaData.file),
+        rawUrl: mediaData.file,
+        tracks: mediaData.tracks,
+        sessionId: sessionId,
+        serverName: 'goodstream'
+      });
+
+    } else {
+      // Vimeos: usar resolver normal
+      const result = await resolveVimeosEmbed(null, embedUrl);
+      return res.json({
+        type: 'hls',
+        url: result.url,
         rawUrl: result.url,
-        cookies: result.cookies || "",
         tracks: result.tracks || [],
-        audioTracks: result.audioTracks || [],
-        resolvedAt: result.resolvedAt
+        serverName: 'vimeos'
       });
     }
 
-    return res.status(404).json({ error: "No se pudo resolver el enlace .m3u8" });
   } catch (error) {
-    console.error("Error en /api/resolve-playwright:", error);
+    console.error("Error:", error);
     return res.status(500).json({ error: error.message });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════
-// 2. Proxy Stream Anti-403 con Referer + Cookies Dinámicos
+// PROXY DE STREAM VIA PLAYWRIGHT (navegador real)
 // ═══════════════════════════════════════════════════════════════
-app.get("/api/stream", async (req, res) => {
+app.get("/api/stream-proxy", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
-  res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range");
 
+  const sessionId = req.query.session;
   const targetUrl = req.query.url;
-  const customReferer = req.query.referer || "https://vimeos.net/";
-  const cookies = req.query.cookies || "";  // ← RECIBIR COOKIES
 
-  if (!targetUrl) return res.status(400).send("Falta el parámetro url");
+  if (!sessionId || !targetUrl) {
+    return res.status(400).send("Faltan parámetros session o url");
+  }
+
+  const session = sessions.get(sessionId);
+  if (!session) {
+    return res.status(410).send("Sesión expirada. Recarga el video.");
+  }
 
   try {
-    const originHost = new URL(customReferer).origin;
+    session.lastUsed = Date.now();
 
-    console.log('=== /api/stream ===');
-    console.log('URL:', targetUrl.substring(0, 100));
-    console.log('Referer:', customReferer);
-    console.log('Cookies presentes:', cookies ? 'SÍ (' + cookies.substring(0, 50) + '...)' : 'NO');
-
-    const response = await fetch(targetUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": customReferer,
-        "Origin": originHost,
-        "Cookie": cookies,  // ← REENVIAR COOKIES A GOODSTREAM
-        "Accept": "*/*",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Connection": "keep-alive"
-      }
-    });
-
-    console.log('GoodStream status:', response.status);
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.log('GoodStream error body:', errorBody.substring(0, 300));
-      return res.status(response.status).send(`Error CDN Provider: ${response.status}`);
-    }
-
-    const contentType = response.headers.get("content-type") || "application/vnd.apple.mpegurl";
-    const data = await response.arrayBuffer();
-
-    // ═══════════════════════════════════════════════════════════════
-    // Reescritura del manifiesto m3u8
-    // ═══════════════════════════════════════════════════════════════
-    if (targetUrl.includes(".m3u8") || contentType.includes("mpegurl")) {
-      let text = new TextDecoder().decode(data);
-
-      // FORZAR HTTPS SIEMPRE
-      const hostUrl = `https://${req.get("host")}/api/stream?referer=${encodeURIComponent(customReferer)}&cookies=${encodeURIComponent(cookies)}&url=`;
-
-      // URL base del m3u8 para resolver relativas
-      const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf("/") + 1);
-
-      const lines = text.split("\n").map((line) => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) return line;
-
-        let absoluteSegmentUrl = trimmed;
-
-        // URL relativa → absoluta
-        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://") && !trimmed.startsWith("//")) {
-          absoluteSegmentUrl = new URL(trimmed, baseUrl).href;
+    // USAR LA PÁGINA DE PLAYWRIGHT PARA HACER LA PETICIÓN
+    // Esto mantiene la misma sesión, cookies, fingerprint
+    const response = await session.page.evaluate(async (url) => {
+      const res = await fetch(url, {
+        credentials: 'include', // Enviar cookies
+        headers: {
+          'Accept': '*/*',
+          'Accept-Language': 'es-ES,es;q=0.9'
         }
-        // Protocol-relative → https
-        else if (trimmed.startsWith("//")) {
-          absoluteSegmentUrl = "https:" + trimmed;
-        }
-        // http → https
-        else if (trimmed.startsWith("http://")) {
-          absoluteSegmentUrl = trimmed.replace("http://", "https://");
-        }
-
-        return `${hostUrl}${encodeURIComponent(absoluteSegmentUrl)}`;
       });
 
-      text = lines.join("\n");
+      const contentType = res.headers.get('content-type') || 'application/octet-stream';
+      const buffer = await res.arrayBuffer();
+      const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
 
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-      return res.status(200).send(text);
+      return {
+        status: res.status,
+        contentType: contentType,
+        base64: base64
+      };
+    }, targetUrl);
+
+    if (response.status !== 200) {
+      return res.status(response.status).send(`Error: ${response.status}`);
     }
 
-    // Retorno de segmentos (.ts / .vtt)
-    res.setHeader("Content-Type", contentType);
-    return res.status(200).send(Buffer.from(data));
+    // Si es m3u8, reescribir URLs para pasar por este proxy
+    if (targetUrl.includes('.m3u8') || response.contentType.includes('mpegurl')) {
+      const text = Buffer.from(response.base64, 'base64').toString('utf-8');
+      const hostUrl = `https://${req.get('host')}/api/stream-proxy?session=${sessionId}&url=`;
+      const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+
+      const lines = text.split('\n').map(line => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) return line;
+
+        let absoluteUrl = trimmed;
+        if (!trimmed.startsWith('http')) {
+          absoluteUrl = new URL(trimmed, baseUrl).href;
+        }
+
+        return `${hostUrl}${encodeURIComponent(absoluteUrl)}`;
+      });
+
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      return res.send(lines.join('\n'));
+    }
+
+    // Para segmentos .ts, devolver binario
+    const buffer = Buffer.from(response.base64, 'base64');
+    res.setHeader('Content-Type', response.contentType);
+    res.send(buffer);
 
   } catch (error) {
     console.error("Stream proxy error:", error);
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════
-// 3. Extract VOE
-// ═══════════════════════════════════════════════════════════════
-app.get("/api/extract-voe", async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ error: 'Missing "url" query parameter.' });
-
-  let browser;
-  try {
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    });
-
-    await context.route("**/*.{png,jpg,jpeg,gif,svg,css,woff,woff2}", (route) => route.abort());
-    await context.route("**/*ads*", (route) => route.abort());
-
-    const page = await context.newPage();
-    let streamUrl = null;
-
-    page.on("request", (request) => {
-      const reqUrl = request.url();
-      if (reqUrl.includes(".m3u8") || reqUrl.includes(".mp4")) {
-        if (!streamUrl) streamUrl = reqUrl;
-      }
-    });
-
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
-
-    let extractedMediaUrl = await page.evaluate(() => {
-      if (typeof window.jwplayer === "function") {
-        try {
-          const player = window.jwplayer();
-          const playlist = player.getPlaylist();
-          if (playlist && playlist[0] && playlist[0].file) return playlist[0].file;
-        } catch (e) {}
-      }
-
-      const scripts = Array.from(document.querySelectorAll("script"));
-      for (const script of scripts) {
-        const content = script.textContent || "";
-        const m3u8Match = content.match(/https?:\/\/[^"'\s]+\.m3u8[^"'\s]*/);
-        if (m3u8Match) return m3u8Match[0];
-        const mp4Match = content.match(/https?:\/\/[^"'\s]+\.mp4[^"'\s]*/);
-        if (mp4Match) return mp4Match[0];
-        const voeRedirectMatch = content.match(/window\.location\.href\s*=\s*['"]([^'"]+)['"]/);
-        if (voeRedirectMatch) return voeRedirectMatch[1];
-      }
-      return null;
-    });
-
-    const posterUrl = await page.evaluate(() => {
-      const ogImage = document.querySelector('meta[property="og:image"], meta[name="og:image"]');
-      return ogImage ? ogImage.getAttribute("content") : null;
-    });
-
-    if (!extractedMediaUrl && streamUrl) extractedMediaUrl = streamUrl;
-    await browser.close();
-
-    if (!extractedMediaUrl) {
-      return res.status(404).json({ error: "Direct video stream URL could not be extracted." });
-    }
-
-    return res.json({ success: true, streamUrl: extractedMediaUrl, posterUrl: posterUrl || null });
-  } catch (error) {
-    if (browser) await browser.close();
-    return res.status(500).json({ error: error.message });
+    return res.status(500).send(error.message);
   }
 });
 
@@ -259,5 +228,5 @@ app.get("*", (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor activo en el puerto ${PORT}`);
+  console.log(`Servidor activo en puerto ${PORT}`);
 });
