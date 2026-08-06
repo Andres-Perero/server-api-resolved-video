@@ -223,7 +223,8 @@
     video.style.display = 'none';
     controlsOverlay.style.display = 'none';
     progressTrack.parentElement.style.display = 'none';
-    document.getElementById('bottom-controls').style.display = 'none';
+  const bottomControls = document.getElementById('bottom-controls');
+if (bottomControls) bottomControls.style.display = 'none';
 
     // Limpiar iframe anterior si existe
     if (iframePlayer) {
@@ -271,7 +272,8 @@
     video.style.display = '';
     controlsOverlay.style.display = '';
     progressTrack.parentElement.style.display = '';
-    document.getElementById('bottom-controls').style.display = '';
+   const bottomControls = document.getElementById('bottom-controls');
+if (bottomControls) bottomControls.style.display = '';
   }
 
   // ═══════════════════════════════════════════════════════════════
