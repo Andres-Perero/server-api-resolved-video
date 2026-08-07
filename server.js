@@ -1,8 +1,6 @@
 import express from "express";
 import cors from "cors";
 import { chromium } from "playwright";
-import { resolveVimeosEmbed } from "./resolvers/vimeos.js";
-import { resolveGoodstreamEmbed } from "./resolvers/goodstream.js";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -12,28 +10,46 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["Content-Type", "Authorization"] }));
-app.use(express.static(path.join(__dirname, "web-singler")));
+app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["*"] }));
+app.use(express.static(path.join(__dirname, "public")));
 
 // ═══════════════════════════════════════════════════════════════
 // SESIONES DE PLAYWRIGHT PERSISTENTES
-// Cada sesión = un navegador abierto con su propia IP/contexto
+// Cada sesión = un navegador abierto con su propio contexto
 // ═══════════════════════════════════════════════════════════════
-const sessions = new Map(); // sessionId → { context, page, lastUsed }
+const sessions = new Map(); // sessionId → { browser, context, page, referer, lastUsed }
 
 // Limpiar sesiones inactivas cada 5 minutos
 setInterval(() => {
   const now = Date.now();
   for (const [id, session] of sessions.entries()) {
-    if (now - session.lastUsed > 10 * 60 * 1000) { // 10 minutos
-      session.context.close().catch(() => {});
+    if (now - session.lastUsed > 15 * 60 * 1000) { // 15 minutos
+      session.browser.close().catch(() => {});
       sessions.delete(id);
       console.log(`[SESSION] Eliminada sesión inactiva: ${id}`);
     }
   }
 }, 5 * 60 * 1000);
 
-// Crear nueva sesión de Playwright
+// ═══════════════════════════════════════════════════════════════
+// PATRONES BLOQUEADOS PARA VIMEOS
+// ═══════════════════════════════════════════════════════════════
+const VIMEOS_BLOCKED_PATTERNS = [
+  'cdn.jsdelivr.net/npm/disable-devtool',
+  'imasdk.googleapis.com',
+  'cdn.jsdelivr.net/npm/ima-ad-player',
+  'vimeos.net/js/pop.js',
+  'vimeos.net/xd/',
+  'anal.vimeos.net',
+  'adangle.online',
+  'xbeat.space',
+  'animehack.org',
+  '.mp4'
+];
+
+// ═══════════════════════════════════════════════════════════════
+// CREAR SESIÓN DE PLAYWRIGHT
+// ═══════════════════════════════════════════════════════════════
 async function createSession(sessionId, embedUrl) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
@@ -44,92 +60,129 @@ async function createSession(sessionId, embedUrl) {
 
   const page = await context.newPage();
 
-  // Bloquear ads y trackers
+  // Bloquear ads, anti-devtool, trackers
   await page.route('**/*', (route) => {
     const url = route.request().url();
-    const blocked = ['ads', 'analytics', 'googletag', 'doubleclick', 'facebook', 'twitter'];
-    if (blocked.some(b => url.includes(b))) {
+    if (VIMEOS_BLOCKED_PATTERNS.some((p) => url.includes(p))) {
       return route.abort();
     }
     return route.continue();
   });
 
-  // Navegar al embed y esperar que JWPlayer cargue
-  await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-  await page.waitForTimeout(3000);
+  const hlsHits = [];
+  page.on('response', (res) => {
+    const url = res.url();
+    if (/master\.m3u8|\.urlset\/master\.m3u8/.test(url)) {
+      hlsHits.push(url);
+    }
+  });
+
+  // Navegar al embed
+  await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+
+  // Cerrar interstitial
+  const clickCandidates = ['text=Empezar desde el inicio', 'text=Continuar viendo', 'text=Resume'];
+  for (const selector of clickCandidates) {
+    const el = page.locator(selector).first();
+    if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await el.click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(1000);
+    }
+  }
 
   // Esperar JWPlayer
   await page.waitForFunction(
-    () => typeof window.jwplayer === 'function',
-    { timeout: 10000 }
+    () => { try { return typeof jwplayer === 'function' && jwplayer().getConfig?.(); } catch { return false; } },
+    { timeout: 15000 }
   ).catch(() => {});
 
-  sessions.set(sessionId, { browser, context, page, embedUrl, lastUsed: Date.now() });
-  return sessions.get(sessionId);
+  // Extraer datos del JWPlayer
+  const mediaData = await page.evaluate(() => {
+    try {
+      const player = jwplayer();
+      const config = player.getConfig?.() || {};
+      const playlist = player.getPlaylist?.()?.[0] || {};
+
+      const tracks = (playlist.tracks || config.tracks || [])
+        .filter((t) => t.kind === 'captions' || t.kind === 'subtitles')
+        .map((t) => ({ label: t.label || 'Unknown', file: t.file, lang: t.lang || 'es' }));
+
+      const audioTracks = (player.getAudioTracks?.() || []).map((a) => ({
+        id: a.id,
+        label: a.name || a.label
+      }));
+
+      const file = playlist.sources?.[0]?.file || config.sources?.[0]?.file || null;
+
+      return { file, tracks, audioTracks };
+    } catch {
+      return { file: null, tracks: [], audioTracks: [] };
+    }
+  }).catch(() => ({ file: null, tracks: [], audioTracks: [] }));
+
+  const finalUrl = mediaData.file || hlsHits[0] || null;
+
+  const parsedEmbed = new URL(embedUrl);
+  const refererHost = `${parsedEmbed.protocol}//${parsedEmbed.host}/`;
+
+  if (!finalUrl) {
+    await browser.close();
+    return null;
+  }
+
+  // Guardar sesión
+  sessions.set(sessionId, { 
+    browser, 
+    context, 
+    page, 
+    referer: refererHost,
+    lastUsed: Date.now() 
+  });
+
+  return {
+    type: 'hls',
+    url: finalUrl,
+    tracks: mediaData.tracks,
+    audioTracks: mediaData.audioTracks,
+    referer: refererHost,
+    sessionId: sessionId,
+    resolvedAt: new Date().toISOString()
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RESOLVER EMBED (crea sesión y devuelve sessionId)
+// ENDPOINT: Resolver embed (crea sesión persistente)
+// GET /api/resolve?url=https://vimeos.net/embed-xxx.html
 // ═══════════════════════════════════════════════════════════════
-app.get("/api/resolve-playwright", async (req, res) => {
+app.get("/api/resolve", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const embedUrl = req.query.url;
-  if (!embedUrl) return res.status(400).json({ error: 'Parámetro "url" requerido' });
+
+  if (!embedUrl) {
+    return res.status(400).json({ error: 'Parámetro "url" requerido' });
+  }
 
   try {
-    const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+    if (embedUrl.includes("vimeos")) {
+      const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+      const result = await createSession(sessionId, embedUrl);
 
-    if (embedUrl.includes("goodstream.one")) {
-      // Crear sesión persistente para GoodStream
-      const session = await createSession(sessionId, embedUrl);
-
-      // Extraer datos del JWPlayer
-      const mediaData = await session.page.evaluate(() => {
-        try {
-          const player = window.jwplayer();
-          const config = player.getConfig?.() || {};
-          const playlist = player.getPlaylist?.()?.[0] || {};
-
-          const tracks = (playlist.tracks || config.tracks || [])
-            .filter(t => t.kind === 'captions' || t.kind === 'subtitles')
-            .map(t => ({ label: t.label || 'Unknown', file: t.file }));
-
-          const file = playlist.sources?.[0]?.file || config.sources?.[0]?.file || null;
-
-          return { file, tracks };
-        } catch (e) {
-          return { file: null, tracks: [] };
-        }
-      });
-
-      if (!mediaData.file) {
-        await session.context.close();
-        sessions.delete(sessionId);
+      if (!result) {
         return res.status(404).json({ error: "No se pudo resolver el stream" });
       }
 
-      // URL del proxy que usa la sesión de Playwright
-      const proxyUrl = `https://${req.get('host')}/api/stream-proxy?session=${sessionId}&url=`;
+      return res.json(result);
 
+    } else if (embedUrl.includes("goodstream")) {
       return res.json({
         type: 'hls',
-        url: proxyUrl + encodeURIComponent(mediaData.file),
-        rawUrl: mediaData.file,
-        tracks: mediaData.tracks,
-        sessionId: sessionId,
-        serverName: 'goodstream'
+        url: null,
+        serverName: 'goodstream',
+        message: 'Usar Worker de GoodStream en el frontend'
       });
-
     } else {
-      // Vimeos: usar resolver normal
-      const result = await resolveVimeosEmbed(null, embedUrl);
-      return res.json({
-        type: 'hls',
-        url: result.url,
-        rawUrl: result.url,
-        tracks: result.tracks || [],
-        serverName: 'vimeos'
-      });
+      return res.status(400).json({ error: 'Servidor no soportado' });
     }
 
   } catch (error) {
@@ -139,145 +192,121 @@ app.get("/api/resolve-playwright", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// PROXY DE STREAM VIA PLAYWRIGHT (navegador real)
+// ENDPOINT: Proxy CORS usando sesión de Playwright
+// GET /api/proxy?session=xxx&url=https://...
 // ═══════════════════════════════════════════════════════════════
-app.get("/api/stream-proxy", async (req, res) => {
+app.get("/api/proxy", async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
+  res.setHeader("Access-Control-Allow-Headers", "*");
 
   const sessionId = req.query.session;
   const targetUrl = req.query.url;
+  const referer = req.query.referer;
 
-  if (!sessionId || !targetUrl) {
-    return res.status(400).send("Faltan parámetros session o url");
+  if (!targetUrl) {
+    return res.status(400).json({ error: 'Parámetro "url" requerido' });
   }
 
-  const session = sessions.get(sessionId);
-  if (!session) {
-    return res.status(410).send("Sesión expirada. Recarga el video.");
-  }
+  // Si hay sesión, usar Playwright para hacer la petición
+  // Si no hay sesión, usar fetch normal (fallback)
+  const session = sessionId ? sessions.get(sessionId) : null;
 
   try {
-    session.lastUsed = Date.now();
+    let response;
+    let responseBody;
+    let contentType;
 
-    // USAR LA PÁGINA DE PLAYWRIGHT PARA HACER LA PETICIÓN
-    // Esto mantiene la misma sesión, cookies, fingerprint
-    const response = await session.page.evaluate(async (url) => {
-      const res = await fetch(url, {
-        credentials: 'include', // Enviar cookies
+    if (session) {
+      // USAR PLAYWRIGHT: la misma sesión que resolvió el embed
+      session.lastUsed = Date.now();
+
+      response = await session.page.evaluate(async (url) => {
+        const res = await fetch(url, {
+          credentials: 'include',
+          headers: {
+            'Accept': '*/*',
+            'Accept-Language': 'es-ES,es;q=0.9'
+          }
+        });
+
+        const contentType = res.headers.get('content-type') || 'application/octet-stream';
+        const buffer = await res.arrayBuffer();
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+
+        return {
+          status: res.status,
+          contentType: contentType,
+          base64: base64
+        };
+      }, targetUrl);
+
+      if (response.status !== 200) {
+        return res.status(response.status).send(`Upstream error: ${response.status}`);
+      }
+
+      contentType = response.contentType;
+      responseBody = Buffer.from(response.base64, 'base64');
+
+    } else {
+      // FALLBACK: fetch normal con headers
+      const fetchRes = await fetch(targetUrl, {
         headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': referer || 'https://vimeos.net/',
+          'Origin': referer ? new URL(referer).origin : 'https://vimeos.net',
           'Accept': '*/*',
           'Accept-Language': 'es-ES,es;q=0.9'
         }
       });
 
-      const contentType = res.headers.get('content-type') || 'application/octet-stream';
-      const buffer = await res.arrayBuffer();
-      const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+      if (!fetchRes.ok) {
+        return res.status(fetchRes.status).send(`Upstream error: ${fetchRes.status}`);
+      }
 
-      return {
-        status: res.status,
-        contentType: contentType,
-        base64: base64
-      };
-    }, targetUrl);
-
-    if (response.status !== 200) {
-      return res.status(response.status).send(`Error: ${response.status}`);
+      contentType = fetchRes.headers.get('content-type') || 'application/octet-stream';
+      responseBody = Buffer.from(await fetchRes.arrayBuffer());
     }
 
-    // Si es m3u8, reescribir URLs para pasar por este proxy
-    if (targetUrl.includes('.m3u8') || response.contentType.includes('mpegurl')) {
-      const text = Buffer.from(response.base64, 'base64').toString('utf-8');
-      const hostUrl = `https://${req.get('host')}/api/stream-proxy?session=${sessionId}&url=`;
+    res.setHeader('Content-Type', contentType);
+
+    // ─── M3U8: reescribir TODAS las URLs ─────────────────────
+    if (contentType.includes('mpegurl') || contentType.includes('m3u8') || targetUrl.includes('.m3u8')) {
+      const text = responseBody.toString('utf-8');
+
+      const proxyBase = `${req.protocol}://${req.get('host')}/api/proxy?` + 
+        (sessionId ? `session=${sessionId}&` : `referer=${encodeURIComponent(referer || 'https://vimeos.net/')}&`) + 
+        `url=`;
+
       const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
 
       const lines = text.split('\n').map(line => {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) return line;
 
-        let absoluteUrl = trimmed;
-        if (!trimmed.startsWith('http')) {
+        let absoluteUrl;
+        if (trimmed.startsWith('http')) {
+          absoluteUrl = trimmed;
+        } else if (trimmed.startsWith('/')) {
+          absoluteUrl = new URL(trimmed, baseUrl).origin + trimmed;
+        } else {
           absoluteUrl = new URL(trimmed, baseUrl).href;
         }
 
-        return `${hostUrl}${encodeURIComponent(absoluteUrl)}`;
+        return proxyBase + encodeURIComponent(absoluteUrl);
       });
 
-      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       return res.send(lines.join('\n'));
     }
 
-    // Para segmentos .ts, devolver binario
-    const buffer = Buffer.from(response.base64, 'base64');
-    res.setHeader('Content-Type', response.contentType);
-    res.send(buffer);
-
-  } catch (error) {
-    console.error("Stream proxy error:", error);
-    return res.status(500).send(error.message);
-  }
-});
-// Añade esto a tu servidor principal (Express/Fastify/etc)
-
-// Endpoint proxy: recibe URL y la devuelve con headers CORS + Referer
-app.get('/api/cors-proxy', async (req, res) => {
-  const targetUrl = req.query.url;
-  const referer = req.query.referer || 'https://goodstream.one/';
-  
-  if (!targetUrl) {
-    return res.status(400).json({ error: 'Missing url parameter' });
-  }
-
-  try {
-    const response = await fetch(targetUrl, {
-      headers: {
-        'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0',
-        'Referer': referer,
-        'Origin': new URL(referer).origin,
-        'Accept': '*/*',
-        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-      },
-      // Importante: no seguir redirects automáticamente para controlar todo
-      redirect: 'follow',
-    });
-
-    // Copiar headers importantes
-    const contentType = response.headers.get('content-type') || 'application/octet-stream';
-    
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Content-Type', contentType);
-    
-    // Si es m3u8, procesamos para reescribir URLs relativas
-    if (contentType.includes('mpegurl') || contentType.includes('m3u8') || targetUrl.includes('.m3u8')) {
-      const text = await response.text();
-      
-      // Reescribir URLs relativas a absolutas y pasarlas por nuestro proxy
-      const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-      const proxyBase = `${req.protocol}://${req.get('host')}/api/cors-proxy?referer=${encodeURIComponent(referer)}&url=`;
-      
-      const processed = text.replace(
-        /^(?!#)([^\s]+)/gm,
-        (match) => {
-          // Si ya es absoluta
-          if (match.startsWith('http')) {
-            return proxyBase + encodeURIComponent(match);
-          }
-          // Si es relativa
-          return proxyBase + encodeURIComponent(baseUrl + match);
-        }
-      );
-      
-      return res.send(processed);
+    // ─── Subtítulos VTT/SRT ──────────────────────────────────
+    if (contentType.includes('text/vtt') || contentType.includes('text/srt') || targetUrl.includes('.vtt') || targetUrl.includes('.srt')) {
+      return res.send(responseBody.toString('utf-8'));
     }
 
-    // Para segmentos .ts, .m4s, etc: stream directo
-    const buffer = Buffer.from(await response.arrayBuffer());
-    res.setHeader('Content-Length', buffer.length);
-    res.send(buffer);
+    // ─── Segmentos .ts, .m4s: stream binario ─────────────────
+    res.setHeader('Content-Length', responseBody.length);
+    res.send(responseBody);
 
   } catch (err) {
     console.error('[PROXY ERROR]', err.message);
@@ -286,19 +315,22 @@ app.get('/api/cors-proxy', async (req, res) => {
 });
 
 // Preflight CORS
-app.options('/api/cors-proxy', (req, res) => {
+app.options('/api/proxy', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.sendStatus(200);
 });
+
 // ═══════════════════════════════════════════════════════════════
 // SPA fallback
 // ═══════════════════════════════════════════════════════════════
 app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "web-singler", "index.html"));
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor activo en puerto ${PORT}`);
+  console.log(`🚀 Servidor activo en puerto ${PORT}`);
+  console.log(`📡 API Resolve: http://localhost:${PORT}/api/resolve?url=...`);
+  console.log(`📡 API Proxy:  http://localhost:${PORT}/api/proxy?session=...&url=...`);
 });
