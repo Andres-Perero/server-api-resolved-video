@@ -4,6 +4,7 @@ node_modules/
 .env.local
 
 
-
+web-singler/player-copy.js 
+diagnose-goodstream.js
 diagnose-jessicachoosemake.js
 extract-voe.js

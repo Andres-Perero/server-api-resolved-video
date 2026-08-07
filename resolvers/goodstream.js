@@ -91,11 +91,15 @@ export async function resolveGoodstreamEmbed(context, embedUrl) {
     let mediaData = { file: directFile, tracks: directTracks, audioTracks: [] };
 
     if (!mediaData.file) {
-      // Esperar a que Rocket Loader ejecute los scripts si el regex falló
-      await page.waitForFunction(
-        () => typeof window.jwplayer === 'function' && window.jwplayer('vplayer')?.getConfig,
-        { timeout: 7_000 }
-      ).catch(() => {});
+      // Esperar a que jwplayer esté listo Y tenga una fuente cargada
+await page.waitForFunction(() => {
+    const p = jwplayer('vplayer');
+    return p && p.getConfig && p.getPlaylist()?.[0]?.sources?.[0]?.file;
+}, { timeout: 15000 });
+
+const file = await page.evaluate(() => 
+    jwplayer('vplayer').getPlaylist()[0].sources[0].file
+);
 
       const runtimeData = await page.evaluate(() => {
         try {

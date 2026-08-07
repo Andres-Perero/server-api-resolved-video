@@ -1,12 +1,34 @@
 // ═══════════════════════════════════════════════════════════════
 // REPRODUCTOR MULTI-SERVIDOR HLS
 // Soporta: Vimeos (proxy HLS), GoodStream (iframe directo)
+// AHORA CON: Captura automática de M3U8 para el sistema de descarga
 // ═══════════════════════════════════════════════════════════════
 
 (function () {
   'use strict';
 
   const RESOLVER_API = 'https://server-api-resolved-video.onrender.com';
+
+  // ─── CAPTURA DE M3U8 ─────────────────────────────────────────
+  // Colecciona todas las URLs de playlists y segmentos detectadas
+  const capturedManifests = new Set();
+  const capturedSegments = new Set();
+  
+  function reportManifest(url, kind = 'hls', title = '') {
+    if (!url || capturedManifests.has(url)) return;
+    capturedManifests.add(url);
+    
+    // Reporta al background.js para que aparezca en el popup de descargas
+    chrome.runtime.sendMessage({
+      type: 'VIDEO_FOUND',
+      url: url,
+      kind: kind,
+      title: title || VIDEO_TITLE || document.title,
+      contentType: 'application/vnd.apple.mpegurl'
+    }).catch(() => {});
+    
+    console.log('[M3U8 CAPTURADO]', url);
+  }
 
   // Detecta servidor y modo de reproducción
   function detectServer(url) {
@@ -77,7 +99,7 @@
   let isSeeking = false;
   let seekDebounceTimer = null;
   let currentSource = null;
-  let iframePlayer = null;  // ← Referencia al iframe de GoodStream
+  let iframePlayer = null;
 
   // ═══════════════════════════════════════════════════════════════
   // TOAST
@@ -196,17 +218,16 @@
       const data = await res.json();
       if (!data.url) throw new Error('No se pudo resolver el stream');
 
-      // En resolveEmbed, guardar sessionId
-return {
-  title: VIDEO_TITLE,
-  type: 'hls',
-  url: data.url,        // Ahora es /api/stream-proxy?session=...
-  rawUrl: data.rawUrl,
-  tracks: data.tracks || [],
-  sessionId: data.sessionId,  // ← Guardar
-  serverName: server.name,
-  iframeMode: false  // Ahora usamos proxy de nuevo, pero via Playwright
-};
+      return {
+        title: VIDEO_TITLE,
+        type: 'hls',
+        url: data.url,
+        rawUrl: data.rawUrl || data.url,
+        tracks: data.tracks || [],
+        audioTracks: data.audioTracks || [],
+        serverName: server.name,
+        iframeMode: server.iframeMode
+      };
     } catch (err) {
       console.error('Error resolviendo:', err);
       throw err;
@@ -220,25 +241,21 @@ return {
     hideLoading();
     hideError();
 
-    // Ocultar video nativo y controles personalizados
     video.style.display = 'none';
     controlsOverlay.style.display = 'none';
     progressTrack.parentElement.style.display = 'none';
-  const bottomControls = document.getElementById('bottom-controls');
-if (bottomControls) bottomControls.style.display = 'none';
+    const bottomControls = document.getElementById('bottom-controls');
+    if (bottomControls) bottomControls.style.display = 'none';
 
-    // Limpiar iframe anterior si existe
     if (iframePlayer) {
       iframePlayer.remove();
       iframePlayer = null;
     }
 
-    // Crear contenedor para el iframe
     const iframeContainer = document.createElement('div');
     iframeContainer.id = 'iframe-player';
     iframeContainer.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;background:#000;';
 
-    // Crear iframe con el embed de GoodStream
     iframePlayer = document.createElement('iframe');
     iframePlayer.src = embedUrl;
     iframePlayer.style.cssText = 'width:100%;height:100%;border:none;';
@@ -250,7 +267,6 @@ if (bottomControls) bottomControls.style.display = 'none';
     iframeContainer.appendChild(iframePlayer);
     playerContainer.appendChild(iframeContainer);
 
-    // Mostrar badge de servidor
     serverBadge.textContent = 'GOODSTREAM';
     qualityBadge.textContent = 'EMBED';
 
@@ -259,7 +275,7 @@ if (bottomControls) bottomControls.style.display = 'none';
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // LIMPIAR IFRAME (cuando se cambia de video)
+  // LIMPIAR IFRAME
   // ═══════════════════════════════════════════════════════════════
   function cleanupIframe() {
     if (iframePlayer) {
@@ -269,12 +285,11 @@ if (bottomControls) bottomControls.style.display = 'none';
     const oldContainer = document.getElementById('iframe-player');
     if (oldContainer) oldContainer.remove();
 
-    // Restaurar video nativo y controles
     video.style.display = '';
     controlsOverlay.style.display = '';
     progressTrack.parentElement.style.display = '';
-   const bottomControls = document.getElementById('bottom-controls');
-if (bottomControls) bottomControls.style.display = '';
+    const bottomControls = document.getElementById('bottom-controls');
+    if (bottomControls) bottomControls.style.display = '';
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -285,7 +300,7 @@ if (bottomControls) bottomControls.style.display = '';
     showLoading('Iniciando...');
     hideError();
     resetVideoSettings();
-    cleanupIframe(); // Limpiar iframe anterior
+    cleanupIframe();
 
     let source;
 
@@ -309,7 +324,6 @@ if (bottomControls) bottomControls.style.display = '';
       return;
     }
 
-    // Si es GoodStream, mostrar iframe directo
     if (source.iframeMode) {
       showGoodstreamIframe(EMBED_URL);
       return;
@@ -320,11 +334,16 @@ if (bottomControls) bottomControls.style.display = '';
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // CARGAR FUENTE HLS (Vimeos y otros)
+  // CARGAR FUENTE HLS (CON CAPTURA DE M3U8)
   // ═══════════════════════════════════════════════════════════════
   function loadSource(source) {
     showLoading('Cargando stream HLS...');
     loadingSubtext.textContent = source.serverName ? `Servidor: ${source.serverName}` : '';
+
+    // ─── CAPTURA: Reporta la URL principal inmediatamente ──────
+    if (source.url) {
+      reportManifest(source.url, 'hls', source.title);
+    }
 
     if (hls) { hls.destroy(); hls = null; }
 
@@ -351,11 +370,37 @@ if (bottomControls) bottomControls.style.display = '';
           enableWorker: true,
           enableSoftwareAES: true,
           liveSyncDurationCount: 3,
-          liveMaxLatencyDurationCount: 10
+          liveMaxLatencyDurationCount: 10,
+          // ─── CAPTURA: Intercepta loaders para capturar todas las URLs ─
+          pLoader: createCapturingLoader('playlist'),
+          fLoader: createCapturingLoader('fragment')
         });
 
         hls.loadSource(source.url);
         hls.attachMedia(video);
+
+        // ─── CAPTURA: Eventos de hls.js para reportar manifests ───
+        hls.on(Hls.Events.MANIFEST_LOADED, (event, data) => {
+          if (data.url) reportManifest(data.url, 'hls', source.title);
+        });
+        
+        hls.on(Hls.Events.LEVEL_LOADED, (event, data) => {
+          if (data.details && data.details.url) {
+            reportManifest(data.details.url, 'hls', source.title);
+          }
+        });
+        
+        hls.on(Hls.Events.AUDIO_TRACK_LOADED, (event, data) => {
+          if (data.details && data.details.url) {
+            reportManifest(data.details.url, 'hls', source.title + ' (audio)');
+          }
+        });
+        
+        hls.on(Hls.Events.SUBTITLE_TRACK_LOADED, (event, data) => {
+          if (data.details && data.details.url) {
+            reportManifest(data.details.url, 'hls', source.title + ' (subtitles)');
+          }
+        });
 
         hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
           hideLoading();
@@ -397,7 +442,9 @@ if (bottomControls) bottomControls.style.display = '';
           }
         });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari nativo - intercepta manualmente con fetch para capturar
         video.src = source.url;
+        reportManifest(source.url, 'hls', source.title);
         video.addEventListener('loadedmetadata', () => {
           hideLoading();
           video.play().catch(() => {});
@@ -413,6 +460,32 @@ if (bottomControls) bottomControls.style.display = '';
     }
 
     setupSubtitles(source.tracks || []);
+  }
+
+  // ─── CAPTURA: Custom loader que reporta todas las URLs M3U8 ──
+  function createCapturingLoader(type) {
+    return class extends Hls.DefaultConfig.loader {
+      constructor(config) {
+        super(config);
+        const originalLoad = this.load.bind(this);
+        
+        this.load = function(context, config, callbacks) {
+          const url = context.url;
+          
+          // Captura playlists (manifests/levels)
+          if (url && (url.includes('.m3u8') || type === 'playlist')) {
+            reportManifest(url, 'hls', VIDEO_TITLE);
+          }
+          
+          // Captura segmentos .ts (opcional, para referencia)
+          if (url && url.match(/\.(ts|m4s|aac|mp4)(\?|#|$)/i)) {
+            capturedSegments.add(url);
+          }
+          
+          return originalLoad(context, config, callbacks);
+        };
+      }
+    };
   }
 
   // ─── Overlays ─────────────────────────────────────────
@@ -715,7 +788,6 @@ if (bottomControls) bottomControls.style.display = '';
   // ═══════════════════════════════════════════════════════════════
   btnFullscreen.addEventListener('click', () => {
     if (iframePlayer) {
-      // Si es iframe, intentar fullscreen del iframe
       const iframeDoc = iframePlayer.contentDocument || iframePlayer.contentWindow?.document;
       if (iframeDoc?.fullscreenElement) {
         iframeDoc.exitFullscreen();
