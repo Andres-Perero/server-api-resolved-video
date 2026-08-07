@@ -219,7 +219,79 @@ app.get("/api/stream-proxy", async (req, res) => {
     return res.status(500).send(error.message);
   }
 });
+// Añade esto a tu servidor principal (Express/Fastify/etc)
 
+// Endpoint proxy: recibe URL y la devuelve con headers CORS + Referer
+app.get('/api/cors-proxy', async (req, res) => {
+  const targetUrl = req.query.url;
+  const referer = req.query.referer || 'https://goodstream.one/';
+  
+  if (!targetUrl) {
+    return res.status(400).json({ error: 'Missing url parameter' });
+  }
+
+  try {
+    const response = await fetch(targetUrl, {
+      headers: {
+        'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0',
+        'Referer': referer,
+        'Origin': new URL(referer).origin,
+        'Accept': '*/*',
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+      },
+      // Importante: no seguir redirects automáticamente para controlar todo
+      redirect: 'follow',
+    });
+
+    // Copiar headers importantes
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Content-Type', contentType);
+    
+    // Si es m3u8, procesamos para reescribir URLs relativas
+    if (contentType.includes('mpegurl') || contentType.includes('m3u8') || targetUrl.includes('.m3u8')) {
+      const text = await response.text();
+      
+      // Reescribir URLs relativas a absolutas y pasarlas por nuestro proxy
+      const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+      const proxyBase = `${req.protocol}://${req.get('host')}/api/cors-proxy?referer=${encodeURIComponent(referer)}&url=`;
+      
+      const processed = text.replace(
+        /^(?!#)([^\s]+)/gm,
+        (match) => {
+          // Si ya es absoluta
+          if (match.startsWith('http')) {
+            return proxyBase + encodeURIComponent(match);
+          }
+          // Si es relativa
+          return proxyBase + encodeURIComponent(baseUrl + match);
+        }
+      );
+      
+      return res.send(processed);
+    }
+
+    // Para segmentos .ts, .m4s, etc: stream directo
+    const buffer = Buffer.from(await response.arrayBuffer());
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+
+  } catch (err) {
+    console.error('[PROXY ERROR]', err.message);
+    res.status(502).json({ error: 'Proxy failed', message: err.message });
+  }
+});
+
+// Preflight CORS
+app.options('/api/cors-proxy', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.sendStatus(200);
+});
 // ═══════════════════════════════════════════════════════════════
 // SPA fallback
 // ═══════════════════════════════════════════════════════════════

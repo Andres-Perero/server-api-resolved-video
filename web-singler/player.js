@@ -1,40 +1,60 @@
 // ═══════════════════════════════════════════════════════════════
 // REPRODUCTOR MULTI-SERVIDOR HLS
-// Soporta: Vimeos (proxy HLS), GoodStream (iframe directo)
-// AHORA CON: Captura automática de M3U8 para el sistema de descarga
+// Sin Service Worker - usa proxy CORS + resolución directa
+// IMPORTANTE: El embed DEBE resolverse desde la IP del usuario
 // ═══════════════════════════════════════════════════════════════
 
 (function () {
   'use strict';
 
-  const RESOLVER_API = 'https://server-api-resolved-video.onrender.com';
+  // ─── PROXIES CORS ROTATIVOS (fallback si uno falla) ──────────
+  const CORS_PROXIES = [
+    'https://api.allorigins.win/raw?url=',
+    'https://corsproxy.io/?',
+    'https://api.codetabs.com/v1/proxy?quest='
+  ];
+  let proxyIndex = 0;
+
+  function getProxy() {
+    return CORS_PROXIES[proxyIndex];
+  }
+
+  function nextProxy() {
+    proxyIndex = (proxyIndex + 1) % CORS_PROXIES.length;
+    console.log('[PROXY] Cambiando a:', getProxy());
+  }
+
+  // ─── ESTADO ──────────────────────────────────────────────────
+  const capturedManifests = new Set();
 
   // ─── CAPTURA DE M3U8 ─────────────────────────────────────────
-  // Colecciona todas las URLs de playlists y segmentos detectadas
-  const capturedManifests = new Set();
-  const capturedSegments = new Set();
-  
   function reportManifest(url, kind = 'hls', title = '') {
     if (!url || capturedManifests.has(url)) return;
     capturedManifests.add(url);
     
-    // Reporta al background.js para que aparezca en el popup de descargas
-    chrome.runtime.sendMessage({
-      type: 'VIDEO_FOUND',
-      url: url,
-      kind: kind,
-      title: title || VIDEO_TITLE || document.title,
-      contentType: 'application/vnd.apple.mpegurl'
-    }).catch(() => {});
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({
+        type: 'VIDEO_FOUND',
+        url: url,
+        kind: kind,
+        title: title || VIDEO_TITLE || document.title,
+        contentType: 'application/vnd.apple.mpegurl'
+      }).catch(() => {});
+    }
     
     console.log('[M3U8 CAPTURADO]', url);
+    
+    try {
+      const stored = JSON.parse(localStorage.getItem('captured_m3u8') || '[]');
+      stored.push({ url, title: title || VIDEO_TITLE, timestamp: Date.now() });
+      localStorage.setItem('captured_m3u8', JSON.stringify(stored.slice(-20)));
+    } catch(e) {}
   }
 
-  // Detecta servidor y modo de reproducción
   function detectServer(url) {
     if (!url) return null;
-    if (url.includes('vimeos')) return { name: 'vimeos', resolver: '/api/resolve-playwright', iframeMode: false };
-    if (url.includes('goodstream')) return { name: 'goodstream', resolver: '/api/resolve-playwright', iframeMode: true };
+    if (url.includes('vimeos')) return { name: 'vimeos' };
+    if (url.includes('goodstream')) return { name: 'goodstream' };
     return null;
   }
 
@@ -47,7 +67,6 @@
   // DOM REFS
   // ═══════════════════════════════════════════════════════════════
   const video = document.getElementById('video');
-  const playerContainer = document.getElementById('player-container');
   const loadingOverlay = document.getElementById('loading-overlay');
   const loadingText = document.getElementById('loading-text');
   const loadingSubtext = document.getElementById('loading-subtext');
@@ -99,7 +118,6 @@
   let isSeeking = false;
   let seekDebounceTimer = null;
   let currentSource = null;
-  let iframePlayer = null;
 
   // ═══════════════════════════════════════════════════════════════
   // TOAST
@@ -112,7 +130,7 @@
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // VIDEO SETTINGS (filtros CSS)
+  // VIDEO SETTINGS
   // ═══════════════════════════════════════════════════════════════
   const videoSettings = {
     brightness: 100, contrast: 100, saturate: 100,
@@ -201,33 +219,125 @@
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // RESOLUCIÓN DE EMBED VIA API
+  // FETCH CON PROXY Y RETRY
   // ═══════════════════════════════════════════════════════════════
-  async function resolveEmbed(embedUrl) {
+  async function fetchWithProxy(url, options = {}, retryCount = 0) {
+    const maxRetries = CORS_PROXIES.length;
+    
+    try {
+      const proxyUrl = getProxy() + encodeURIComponent(url);
+      const res = await fetch(proxyUrl, {
+        ...options,
+        headers: {
+          ...options.headers,
+          'User-Agent': navigator.userAgent
+        }
+      });
+      
+      if (!res.ok && res.status >= 500 && retryCount < maxRetries) {
+        nextProxy();
+        return fetchWithProxy(url, options, retryCount + 1);
+      }
+      
+      return res;
+    } catch (err) {
+      if (retryCount < maxRetries) {
+        nextProxy();
+        return fetchWithProxy(url, options, retryCount + 1);
+      }
+      throw err;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // RESOLUCIÓN DIRECTA EN NAVEGADOR
+  // ═══════════════════════════════════════════════════════════════
+  
+  async function resolveEmbedInBrowser(embedUrl) {
     const server = detectServer(embedUrl);
     if (!server) throw new Error('Servidor no soportado: ' + embedUrl);
 
     showLoading('Resolviendo stream...');
     loadingSubtext.textContent = 'Servidor: ' + server.name;
 
-    const resolverUrl = `${RESOLVER_API}${server.resolver}?url=${encodeURIComponent(embedUrl)}`;
-
     try {
-      const res = await fetch(resolverUrl);
-      if (!res.ok) throw new Error('API ' + res.status);
-      const data = await res.json();
-      if (!data.url) throw new Error('No se pudo resolver el stream');
+      // 1. Obtener HTML del embed via proxy CORS
+      const res = await fetchWithProxy(embedUrl);
+      if (!res.ok) throw new Error('Error cargando embed: ' + res.status);
+      const html = await res.text();
+
+      // 2. Extraer file .m3u8
+      let m3u8Url = null;
+      const m3u8Match = html.match(/file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i);
+      if (m3u8Match) {
+        m3u8Url = m3u8Match[1];
+        if (m3u8Url.startsWith('//')) m3u8Url = 'https:' + m3u8Url;
+        else if (m3u8Url.startsWith('/')) {
+          const base = new URL(embedUrl);
+          m3u8Url = base.origin + m3u8Url;
+        }
+      }
+
+      // 3. Extraer tracks
+      const tracks = [];
+      const tracksMatch = html.match(/tracks\s*:\s*(\[\s*\{[\s\S]*?\}\s*\])/i);
+      if (tracksMatch) {
+        try {
+          const cleaned = tracksMatch[1]
+            .replace(/([{,])\s*([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
+            .replace(/'/g, '"');
+          const rawTracks = JSON.parse(cleaned);
+          rawTracks.forEach((t) => {
+            if (t.kind === 'captions' || t.kind === 'subtitles') {
+              let fileUrl = t.file;
+              if (fileUrl.startsWith('//')) fileUrl = 'https:' + fileUrl;
+              else if (fileUrl.startsWith('/')) {
+                const base = new URL(embedUrl);
+                fileUrl = base.origin + fileUrl;
+              }
+              tracks.push({ label: t.label || 'Unknown', file: fileUrl });
+            }
+          });
+        } catch {
+          const vttRegex = /file\s*:\s*["']([^"']+\.vtt)["'](?:\s*,\s*label\s*:\s*["']([^"']+)["'])?/gi;
+          let match;
+          while ((match = vttRegex.exec(html)) !== null) {
+            if (!match[1].includes('_sli.vtt')) {
+              let fileUrl = match[1];
+              if (fileUrl.startsWith('//')) fileUrl = 'https:' + fileUrl;
+              else if (fileUrl.startsWith('/')) {
+                const base = new URL(embedUrl);
+                fileUrl = base.origin + fileUrl;
+              }
+              tracks.push({ label: match[2] || 'Subtitle', file: fileUrl });
+            }
+          }
+        }
+      }
+
+      // 4. Fallback
+      if (!m3u8Url) {
+        const fallback = html.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+        if (fallback) m3u8Url = fallback[1];
+      }
+
+      if (!m3u8Url) {
+        throw new Error('No se encontró stream .m3u8 en el embed.');
+      }
+
+      console.log('[RESUELTO] M3U8:', m3u8Url);
 
       return {
         title: VIDEO_TITLE,
         type: 'hls',
-        url: data.url,
-        rawUrl: data.rawUrl || data.url,
-        tracks: data.tracks || [],
-        audioTracks: data.audioTracks || [],
+        url: m3u8Url,
+        rawUrl: m3u8Url,
+        tracks: tracks,
+        audioTracks: [],
         serverName: server.name,
-        iframeMode: server.iframeMode
+        referer: embedUrl
       };
+
     } catch (err) {
       console.error('Error resolviendo:', err);
       throw err;
@@ -235,61 +345,28 @@
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // IFRAME DIRECTO PARA GOODSTREAM
+  // CUSTOM LOADER PARA HLS (proxy CORS para segmentos)
   // ═══════════════════════════════════════════════════════════════
-  function showGoodstreamIframe(embedUrl) {
-    hideLoading();
-    hideError();
+  function createProxyLoader() {
+    return class extends Hls.DefaultConfig.loader {
+      load(context, config, callbacks) {
+        const url = context.url;
+        
+        if (url && url.includes('.m3u8')) {
+          reportManifest(url, 'hls', VIDEO_TITLE);
+        }
 
-    video.style.display = 'none';
-    controlsOverlay.style.display = 'none';
-    progressTrack.parentElement.style.display = 'none';
-    const bottomControls = document.getElementById('bottom-controls');
-    if (bottomControls) bottomControls.style.display = 'none';
+        // Si la URL ya es del proxy, no tocar
+        if (url && (url.includes('allorigins') || url.includes('corsproxy') || url.includes('codetabs'))) {
+          return super.load(context, config, callbacks);
+        }
 
-    if (iframePlayer) {
-      iframePlayer.remove();
-      iframePlayer = null;
-    }
+        // Redirige por proxy CORS
+        context.url = getProxy() + encodeURIComponent(url);
 
-    const iframeContainer = document.createElement('div');
-    iframeContainer.id = 'iframe-player';
-    iframeContainer.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:10;background:#000;';
-
-    iframePlayer = document.createElement('iframe');
-    iframePlayer.src = embedUrl;
-    iframePlayer.style.cssText = 'width:100%;height:100%;border:none;';
-    iframePlayer.allow = 'fullscreen; autoplay; encrypted-media';
-    iframePlayer.setAttribute('allowfullscreen', '');
-    iframePlayer.setAttribute('webkitallowfullscreen', '');
-    iframePlayer.setAttribute('mozallowfullscreen', '');
-
-    iframeContainer.appendChild(iframePlayer);
-    playerContainer.appendChild(iframeContainer);
-
-    serverBadge.textContent = 'GOODSTREAM';
-    qualityBadge.textContent = 'EMBED';
-
-    showToast('GoodStream: Reproducción directa');
-    console.log('[GoodStream] iframe cargado:', embedUrl);
-  }
-
-  // ═══════════════════════════════════════════════════════════════
-  // LIMPIAR IFRAME
-  // ═══════════════════════════════════════════════════════════════
-  function cleanupIframe() {
-    if (iframePlayer) {
-      iframePlayer.remove();
-      iframePlayer = null;
-    }
-    const oldContainer = document.getElementById('iframe-player');
-    if (oldContainer) oldContainer.remove();
-
-    video.style.display = '';
-    controlsOverlay.style.display = '';
-    progressTrack.parentElement.style.display = '';
-    const bottomControls = document.getElementById('bottom-controls');
-    if (bottomControls) bottomControls.style.display = '';
+        return super.load(context, config, callbacks);
+      }
+    };
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -300,7 +377,6 @@
     showLoading('Iniciando...');
     hideError();
     resetVideoSettings();
-    cleanupIframe();
 
     let source;
 
@@ -312,10 +388,10 @@
           url: DIRECT_SRC,
           tracks: [],
           serverName: 'direct',
-          iframeMode: false
+          referer: null
         };
       } else if (EMBED_URL) {
-        source = await resolveEmbed(EMBED_URL);
+        source = await resolveEmbedInBrowser(EMBED_URL);
       } else {
         throw new Error('No se proporcionó URL. Usa ?embed= o ?src=');
       }
@@ -324,32 +400,27 @@
       return;
     }
 
-    if (source.iframeMode) {
-      showGoodstreamIframe(EMBED_URL);
-      return;
-    }
-
     currentSource = source;
     loadSource(source);
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // CARGAR FUENTE HLS (CON CAPTURA DE M3U8)
+  // CARGAR FUENTE HLS
   // ═══════════════════════════════════════════════════════════════
   function loadSource(source) {
     showLoading('Cargando stream HLS...');
     loadingSubtext.textContent = source.serverName ? `Servidor: ${source.serverName}` : '';
 
-    // ─── CAPTURA: Reporta la URL principal inmediatamente ──────
-    if (source.url) {
-      reportManifest(source.url, 'hls', source.title);
+    if (source.rawUrl) {
+      reportManifest(source.rawUrl, 'hls', source.title);
     }
 
     if (hls) { hls.destroy(); hls = null; }
 
     if (source.type === 'hls') {
       if (window.Hls && Hls.isSupported()) {
-        hls = new Hls({
+        
+        const hlsConfig = {
           maxBufferLength: 60,
           maxMaxBufferLength: 120,
           maxBufferSize: 60 * 1000 * 1000,
@@ -361,25 +432,28 @@
           abrBandWidthFactor: 0.95,
           abrBandWidthUpFactor: 0.7,
           manifestLoadingMaxRetry: 2,
-          manifestLoadingRetryDelay: 500,
+          manifestLoadingRetryDelay: 1000,
           levelLoadingMaxRetry: 2,
-          levelLoadingRetryDelay: 500,
+          levelLoadingRetryDelay: 1000,
           fragLoadingMaxRetry: 3,
-          fragLoadingRetryDelay: 500,
+          fragLoadingRetryDelay: 1000,
           seekHoleNudgeDuration: 0.1,
-          enableWorker: true,
+          enableWorker: false, // Desactivado para evitar problemas con proxies
           enableSoftwareAES: true,
           liveSyncDurationCount: 3,
           liveMaxLatencyDurationCount: 10,
-          // ─── CAPTURA: Intercepta loaders para capturar todas las URLs ─
-          pLoader: createCapturingLoader('playlist'),
-          fLoader: createCapturingLoader('fragment')
-        });
+          loader: createProxyLoader(),
+          // Aumentar timeouts para proxies lentos
+          manifestLoadingTimeOut: 20000,
+          levelLoadingTimeOut: 20000,
+          fragLoadingTimeOut: 20000
+        };
+
+        hls = new Hls(hlsConfig);
 
         hls.loadSource(source.url);
         hls.attachMedia(video);
 
-        // ─── CAPTURA: Eventos de hls.js para reportar manifests ───
         hls.on(Hls.Events.MANIFEST_LOADED, (event, data) => {
           if (data.url) reportManifest(data.url, 'hls', source.title);
         });
@@ -427,9 +501,16 @@
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
               const code = data.response?.code;
               if (code === 403 || code === 401) {
-                showError(`Bloqueado (HTTP ${code}). El link expiró o falta referrer.`);
+                showError(`Bloqueado (HTTP ${code}). El token del M3U8 está vinculado a otra IP. 
+                  <br><br>
+                  <b>Solución:</b> La URL del M3U8 debe resolverse desde el mismo navegador que reproduce. 
+                  Intenta usar un proxy CORS más rápido o recarga la página.`);
               } else if (code === 404) {
                 showError('Video no encontrado (404). El link expiró.');
+              } else if (code === 408 || data.details === 'manifestLoadTimeOut') {
+                showError('Timeout del proxy CORS. Intentando otro proxy...');
+                nextProxy();
+                setTimeout(() => initPlayer(), 2000);
               } else {
                 showError(`Error de red: ${data.details}. Reintentando...`);
                 setTimeout(() => initPlayer(), 3000);
@@ -437,12 +518,11 @@
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls.recoverMediaError();
             } else {
-              showError(`Error: ${data.details}`);
+              showError(`Error fatal: ${data.details}`);
             }
           }
         });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari nativo - intercepta manualmente con fetch para capturar
         video.src = source.url;
         reportManifest(source.url, 'hls', source.title);
         video.addEventListener('loadedmetadata', () => {
@@ -462,32 +542,6 @@
     setupSubtitles(source.tracks || []);
   }
 
-  // ─── CAPTURA: Custom loader que reporta todas las URLs M3U8 ──
-  function createCapturingLoader(type) {
-    return class extends Hls.DefaultConfig.loader {
-      constructor(config) {
-        super(config);
-        const originalLoad = this.load.bind(this);
-        
-        this.load = function(context, config, callbacks) {
-          const url = context.url;
-          
-          // Captura playlists (manifests/levels)
-          if (url && (url.includes('.m3u8') || type === 'playlist')) {
-            reportManifest(url, 'hls', VIDEO_TITLE);
-          }
-          
-          // Captura segmentos .ts (opcional, para referencia)
-          if (url && url.match(/\.(ts|m4s|aac|mp4)(\?|#|$)/i)) {
-            capturedSegments.add(url);
-          }
-          
-          return originalLoad(context, config, callbacks);
-        };
-      }
-    };
-  }
-
   // ─── Overlays ─────────────────────────────────────────
   function showSeeking() { seekingOverlay.classList.add('visible'); }
   function hideSeeking() { seekingOverlay.classList.remove('visible'); }
@@ -504,7 +558,7 @@
   }
   function hideLoading() { loadingOverlay.classList.add('hidden'); }
   function showError(msg) {
-    errorDetail.textContent = msg;
+    errorDetail.innerHTML = msg; // innerHTML para mostrar <br>
     errorOverlay.classList.add('visible');
     hideLoading(); hideSeeking();
   }
@@ -534,8 +588,7 @@
       trackEl.id = `track-${i}`;
 
       try {
-        const proxyUrl = `${RESOLVER_API}/api/stream?url=${encodeURIComponent(t.file)}&referer=${encodeURIComponent(EMBED_URL || '')}&cookies=${encodeURIComponent(currentSource?.cookies || '')}`;
-        const res = await fetch(proxyUrl);
+        const res = await fetchWithProxy(t.file);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const vttText = await res.text();
         const blob = new Blob([vttText], { type: 'text/vtt' });
@@ -710,7 +763,7 @@
     seekFlash.textContent = text;
     seekFlash.classList.add('show');
     clearTimeout(flashSeek._t);
-    flashSeek._t = setTimeout(() => seekFlash.classList.remove('show'), 500);
+    flashFlash._t = setTimeout(() => seekFlash.classList.remove('show'), 500);
   }
 
   function formatTime(sec) {
@@ -787,15 +840,6 @@
   // PANTALLA COMPLETA
   // ═══════════════════════════════════════════════════════════════
   btnFullscreen.addEventListener('click', () => {
-    if (iframePlayer) {
-      const iframeDoc = iframePlayer.contentDocument || iframePlayer.contentWindow?.document;
-      if (iframeDoc?.fullscreenElement) {
-        iframeDoc.exitFullscreen();
-      } else {
-        iframePlayer.requestFullscreen();
-      }
-      return;
-    }
     const el = document.getElementById('player-container');
     if (!document.fullscreenElement) {
       (el.requestFullscreen || el.webkitRequestFullscreen || function(){}).call(el);
