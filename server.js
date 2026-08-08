@@ -49,28 +49,32 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 // ═══════════════════════════════════════════════════════════════
-// PATRONES BLOQUEADOS PARA VIMEOS
+// PATRONES BLOQUEADOS PARA HLSWish / StreamHG
 // ═══════════════════════════════════════════════════════════════
-const VIMEOS_BLOCKED_PATTERNS = [
+const HLSWISH_BLOCKED_PATTERNS = [
+  'googletagmanager.com',
+  'google-analytics.com',
+  'doubleclick.net',
+  'ads.',
+  'analytics.',
+  'facebook.com/tr',
+  'connect.facebook.net',
+  'twitter.com',
+  'linkedin.com',
+  'tiktok.com',
   'cdn.jsdelivr.net/npm/disable-devtool',
   'imasdk.googleapis.com',
   'cdn.jsdelivr.net/npm/ima-ad-player',
-  'vimeos.net/js/pop.js',
-  'vimeos.net/xd/',
-  'anal.vimeos.net',
-  'adangle.online',
-  'xbeat.space',
-  'animehack.org',
-  '.mp4'
+  '.mp4'  // evitar descargas de mp4 directos que pueden ralentizar
 ];
 
 // ═══════════════════════════════════════════════════════════════
-// CREAR SESIÓN DE PLAYWRIGHT
+// CREAR SESIÓN DE PLAYWRIGHT PARA HLSWish
 // ═══════════════════════════════════════════════════════════════
-async function createSession(sessionId, embedUrl) {
+async function createHLSWishSession(sessionId, embedUrl) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     locale: "es-ES",
     viewport: { width: 1280, height: 720 }
   });
@@ -79,61 +83,157 @@ async function createSession(sessionId, embedUrl) {
 
   await page.route('**/*', (route) => {
     const url = route.request().url();
-    if (VIMEOS_BLOCKED_PATTERNS.some((p) => url.includes(p))) {
+    if (HLSWISH_BLOCKED_PATTERNS.some((p) => url.includes(p))) {
       return route.abort();
     }
     return route.continue();
   });
 
+  // Capturar M3U8 desde network requests
   const hlsHits = [];
   page.on('response', (res) => {
     const url = res.url();
-    if (/master\.m3u8|\.urlset\/master\.m3u8/.test(url)) {
+    if (/\.m3u8/.test(url) && !url.includes('workers.dev')) {
       hlsHits.push(url);
     }
   });
 
   await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(3000);
 
-  const clickCandidates = ['text=Empezar desde el inicio', 'text=Continuar viendo', 'text=Resume'];
+  // Intentar hacer click en botones de play si existen
+  const clickCandidates = ['text=Play', 'text=Reproducir', 'text=Start', '.jw-icon-playback', '[aria-label="Play"]'];
   for (const selector of clickCandidates) {
     const el = page.locator(selector).first();
     if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
       await el.click({ timeout: 2000 }).catch(() => {});
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1500);
     }
   }
 
+  // Esperar a que el packer se ejecute y el player esté listo
   await page.waitForFunction(
-    () => { try { return typeof jwplayer === 'function' && jwplayer().getConfig?.(); } catch { return false; } },
+    () => { 
+      try { 
+        return (typeof jwplayer === 'function' && jwplayer().getConfig?.()) ||
+               (typeof player === 'object' && player.getConfig?.());
+      } catch { 
+        return false; 
+      } 
+    },
     { timeout: 15000 }
   ).catch(() => {});
 
+  // Extraer datos del player
   const mediaData = await page.evaluate(() => {
     try {
-      const player = jwplayer();
-      const config = player.getConfig?.() || {};
-      const playlist = player.getPlaylist?.()?.[0] || {};
+      // Intentar jwplayer primero
+      let player = null;
+      let config = null;
+      
+      if (typeof jwplayer === 'function') {
+        player = jwplayer();
+        config = player.getConfig?.() || {};
+      } else if (typeof player === 'object' && player.getConfig) {
+        config = player.getConfig();
+      }
 
+      const playlist = (config.playlist && config.playlist[0]) || config || {};
+      const sources = playlist.sources || config.sources || [];
+      
+      // Buscar source HLS
+      let file = null;
+      for (const src of sources) {
+        if (src.file && (src.file.includes('.m3u8') || src.type === 'hls')) {
+          file = src.file;
+          break;
+        }
+      }
+      
+      // Fallback: buscar en variables globales comunes de HLSWish
+      if (!file && window.sources) {
+        for (const key in window.sources) {
+          if (window.sources[key] && window.sources[key].includes('.m3u8')) {
+            file = window.sources[key];
+            break;
+          }
+        }
+      }
+      
+      if (!file && window.file) {
+        file = window.file;
+      }
+
+      // Extraer tracks de subtítulos
       const tracks = (playlist.tracks || config.tracks || [])
         .filter((t) => t.kind === 'captions' || t.kind === 'subtitles')
-        .map((t) => ({ label: t.label || 'Unknown', file: t.file, lang: t.lang || 'es' }));
+        .map((t) => ({ 
+          label: t.label || 'Unknown', 
+          file: t.file, 
+          lang: t.lang || 'es',
+          kind: t.kind 
+        }));
 
-      const audioTracks = (player.getAudioTracks?.() || []).map((a) => ({
-        id: a.id,
-        label: a.name || a.label
-      }));
+      // Extraer tracks de audio
+      const audioTracks = [];
+      if (player && player.getAudioTracks) {
+        const at = player.getAudioTracks();
+        for (const a of at) {
+          audioTracks.push({ id: a.id, label: a.name || a.label || a.language });
+        }
+      }
 
-      const file = playlist.sources?.[0]?.file || config.sources?.[0]?.file || null;
+      // Extraer poster/imagen
+      let poster = playlist.image || config.image || null;
 
-      return { file, tracks, audioTracks };
-    } catch {
-      return { file: null, tracks: [], audioTracks: [] };
+      return { file, tracks, audioTracks, poster };
+    } catch (e) {
+      return { file: null, tracks: [], audioTracks: [], poster: null };
     }
-  }).catch(() => ({ file: null, tracks: [], audioTracks: [] }));
+  }).catch(() => ({ file: null, tracks: [], audioTracks: [], poster: null }));
 
-  const finalUrl = mediaData.file || hlsHits[0] || null;
+  // También buscar en el HTML por si el packer creó variables globales
+  const htmlData = await page.evaluate(() => {
+    // Buscar variables comunes que deja el packer de HLSWish
+    const vars = ['sources', 'links', 'file', 'video_url', 'stream_url'];
+    const found = {};
+    for (const v of vars) {
+      if (window[v]) found[v] = window[v];
+    }
+    return found;
+  }).catch(() => ({}));
+
+  // Si no encontramos file en el player, buscar en variables globales
+  let finalUrl = mediaData.file;
+  if (!finalUrl && htmlData.sources) {
+    if (typeof htmlData.sources === 'object') {
+      // links = {hls2: "...", hls4: "..."}
+      const order = ['hls4', 'hls2', 'hls3'];
+      for (const key of order) {
+        if (htmlData.sources[key]) {
+          finalUrl = htmlData.sources[key];
+          break;
+        }
+      }
+    } else if (typeof htmlData.sources === 'string') {
+      finalUrl = htmlData.sources;
+    }
+  }
+  if (!finalUrl && htmlData.file) finalUrl = htmlData.file;
+  if (!finalUrl && htmlData.links) {
+    const order = ['hls4', 'hls2', 'hls3'];
+    for (const key of order) {
+      if (htmlData.links[key]) {
+        finalUrl = htmlData.links[key];
+        break;
+      }
+    }
+  }
+
+  // Fallback: usar M3U8 capturado de network
+  if (!finalUrl && hlsHits.length > 0) {
+    finalUrl = hlsHits[0];
+  }
 
   const parsedEmbed = new URL(embedUrl);
   const refererHost = `${parsedEmbed.protocol}//${parsedEmbed.host}/`;
@@ -156,12 +256,12 @@ async function createSession(sessionId, embedUrl) {
     url: finalUrl,
     tracks: mediaData.tracks,
     audioTracks: mediaData.audioTracks,
+    poster: mediaData.poster,
     referer: refererHost,
     sessionId: sessionId,
     resolvedAt: new Date().toISOString()
   };
 }
-
 // ═══════════════════════════════════════════════════════════════
 // ENDPOINT: Health check
 // ═══════════════════════════════════════════════════════════════
@@ -181,14 +281,16 @@ app.get("/api/resolve", async (req, res) => {
   }
 
   try {
+    const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+
     if (embedUrl.includes("vimeos")) {
-      const sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
       const result = await createSession(sessionId, embedUrl);
+      if (!result) return res.status(404).json({ error: "No se pudo resolver el stream" });
+      return res.json(result);
 
-      if (!result) {
-        return res.status(404).json({ error: "No se pudo resolver el stream" });
-      }
-
+    } else if (embedUrl.includes("hlswish") || embedUrl.includes("streamwish") || embedUrl.includes("streamhg")) {
+      const result = await createHLSWishSession(sessionId, embedUrl);
+      if (!result) return res.status(404).json({ error: "No se pudo resolver el stream de HLSWish" });
       return res.json(result);
 
     } else if (embedUrl.includes("goodstream")) {

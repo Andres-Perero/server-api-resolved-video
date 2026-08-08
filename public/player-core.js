@@ -18,12 +18,21 @@ const capturedManifests = new Set();
 let currentSource = null;
 let hls = null;
 
+/** Corrige https:/host → https://host (típico en ?embed= mal escrito) */
+function normalizeEmbedUrl(url) {
+  if (!url) return url;
+  url = String(url).trim();
+  url = url.replace(/^https:\/(?!\/)/i, 'https://');
+  url = url.replace(/^http:\/(?!\/)/i, 'http://');
+  return url;
+}
+
 // ─── DETECTAR SERVIDOR ──────────────────────────────────────
 function detectServer(url) {
   if (!url) return null;
   if (url.includes('goodstream')) return 'goodstream';
   if (url.includes('vimeos')) return 'vimeos';
-  if (url.includes('hlswish') || url.includes('streamwish')) return 'hlswish';
+  if (url.includes('hlswish') || url.includes('streamhg') || url.includes('streamwish')) return 'hlswish';
   return null;
 }
 
@@ -56,9 +65,24 @@ function reportManifest(url, kind = 'hls', title = '') {
 // ═══════════════════════════════════════════════════════════════
 
 function unpackPacker(html) {
-  const m = html.match(
-    /eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace\(new RegExp\('\\b'\+c\.toString\(a\)\+'\\b','g'\),k\[c\]\);return p\}\('((?:\\'|[^'])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:\\'|[^'])*)'\.split\('\|'\)/
-  );
+  // Variantes del packer Dean Edwards / similar embebido en hlswish
+  const patterns = [
+    // \\b escapado doble (como aparece en el HTML fuente)
+    /eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace\(new RegExp\('\\\\b'\+c\.toString\(a\)\+'\\\\b','g'\),k\[c\]\);return p\}\('((?:\\'|[^'])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:\\'|[^'])*)'\.split\('\|'\)/,
+    // \b simple
+    /eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace\(new RegExp\('\\b'\+c\.toString\(a\)\+'\\b','g'\),k\[c\]\);return p\}\('((?:\\'|[^'])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:\\'|[^'])*)'\.split\('\|'\)/,
+    // flexible: cualquier cuerpo entre { y }('payload'
+    /eval\(function\(p,a,c,k,e,d\)\{[\s\S]*?\}\('((?:\\'|[^'])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:\\'|[^'])*)'\.split\('\|'\)/,
+  ];
+
+  let m = null;
+  for (let i = 0; i < patterns.length; i++) {
+    m = html.match(patterns[i]);
+    if (m) {
+      console.log('[HLSWish] Packer match variante', i + 1);
+      break;
+    }
+  }
   if (!m) return null;
 
   const p = m[1];
@@ -89,18 +113,20 @@ function unpackPacker(html) {
   }
   return result;
 }
-
 function extractHLSWishMedia(html, pageOrigin) {
   const result = { links: {}, captions: [], image: null, duration: null };
 
   const unpacked = unpackPacker(html);
+  if (!unpacked) {
+    console.warn('[HLSWish] Packer NO encontrado en HTML (' + html.length + ' chars)');
+  }
   if (unpacked) {
     console.log('[HLSWish] Packer desempaquetado (' + unpacked.length + ' chars)');
 
     const linksMatch = unpacked.match(/links\s*=\s*\{([^}]+)\}/);
     if (linksMatch) {
       ['hls2', 'hls3', 'hls4'].forEach(function (key) {
-        const km = linksMatch[1].match(new RegExp('"' + key + '"\s*:\s*"([^"]+)"'));
+        const km = linksMatch[1].match(new RegExp('"' + key + '"\\s*:\\s*"([^"]+)"'));
         if (km) {
           let u = km[1];
           if (u.startsWith('/')) u = pageOrigin + u;
@@ -148,77 +174,168 @@ function extractHLSWishMedia(html, pageOrigin) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RESOLUCIÓN HLSWish — Fetch DIRECTO al embed (sin proxy)
+// RESOLUCIÓN HLSWish — método del navegador (igual que hlswish-player.html)
+// 1) Fetch HTML del embed vía Worker (CORS)
+// 2) Desempaquetar packer eval(p,a,c,k)
+// 3) Extraer hls2 / hls3 / hls4 + VTT
+// 4) Reproducir m3u8 vía Worker (el Worker reescribe segmentos/audio)
+// Fallback opcional: API Playwright si el packer falla
 // ═══════════════════════════════════════════════════════════════
 
-async function resolveHLSWish(embedUrl) {
+async function resolveHLSWishBrowser(embedUrl) {
   showLoading('Resolviendo HLSWish...');
-  updateLoadingSubtext('Desempaquetando código...');
+  updateLoadingSubtext('Desempaquetando embed...');
+
+  embedUrl = normalizeEmbedUrl(embedUrl);
+  console.log('[HLSWish] Embed normalizado:', embedUrl);
+
+  const workerUrl = GOODSTREAM_WORKER + encodeURIComponent(embedUrl);
+  console.log('[HLSWish] Worker embed:', workerUrl);
+
+  const res = await fetch(workerUrl);
+  if (!res.ok) throw new Error('Worker HTTP ' + res.status + ' al cargar embed');
+
+  const html = await res.text();
+  console.log('[HLSWish] HTML recibido:', html.length, 'chars');
+
+  const pageOrigin = new URL(embedUrl).origin;
+  const media = extractHLSWishMedia(html, pageOrigin);
+  console.log('[HLSWish] Links hallados:', Object.keys(media.links), media.links);
+
+  // Preferir hls2 (CDN firmado, audio+video); hls4 como respaldo
+  const order = ['hls2', 'hls4', 'hls3', 'regex'];
+  const candidates = [];
+  for (const key of order) {
+    if (media.links[key]) candidates.push({ key, url: media.links[key] });
+  }
+
+  if (!candidates.length) {
+    console.error('[HLSWish] HTML preview:', html.substring(0, 800));
+    throw new Error('No se encontró .m3u8 en el embed de HLSWish');
+  }
+
+  candidates.forEach((c) => {
+    console.log('[HLSWish] Candidato [' + c.key + ']:', c.url.substring(0, 100) + '...');
+  });
+
+  // Master principal
+  let m3u8Url = candidates[0].url;
+  if (m3u8Url.startsWith('//')) m3u8Url = 'https:' + m3u8Url;
+  else if (m3u8Url.startsWith('/')) m3u8Url = pageOrigin + m3u8Url;
+
+  console.log('[HLSWish] Usando [' + candidates[0].key + ']:', m3u8Url.substring(0, 100) + '...');
+  console.log('[HLSWish] Subtítulos:', media.captions.length);
+  if (media.duration) console.log('[HLSWish] Duración:', media.duration + 's');
+
+  // Proxy de subtítulos VTT
+  const tracks = (media.captions || []).map((t) => {
+    let file = t.file;
+    if (file.startsWith('//')) file = 'https:' + file;
+    else if (file.startsWith('/')) file = pageOrigin + file;
+    return {
+      label: t.label || 'Unknown',
+      file: GOODSTREAM_WORKER + encodeURIComponent(file),
+      lang: /eng|en/i.test(t.label || '') ? 'en' : 'es',
+      kind: 'captions',
+      default: !!t.default,
+    };
+  });
+
+  return {
+    title: typeof VIDEO_TITLE !== 'undefined' ? VIDEO_TITLE : 'HLSWish',
+    type: 'hls',
+    url: m3u8Url,
+    rawUrl: m3u8Url,
+    proxyUrl: GOODSTREAM_WORKER + encodeURIComponent(m3u8Url),
+    candidates: candidates.map((c) => c.url), // para fallback en loadSource si hace falta
+    tracks,
+    audioTracks: [], // vienen dentro del HLS
+    serverName: 'hlswish',
+    referer: embedUrl,
+    origin: pageOrigin,
+    useWorkerProxy: true,
+    workerUrl: GOODSTREAM_WORKER,
+    poster: media.image || null,
+    duration: media.duration || null,
+  };
+}
+
+/** Fallback: API Playwright en Render (mismo endpoint que Vimeos) */
+async function resolveHLSWishApi(embedUrl) {
+  showLoading('Resolviendo HLSWish (API)...');
+  updateLoadingSubtext('Despertando servidor...');
 
   try {
-    // IMPORTANTE: HLSWish bloquea el proxy del Worker en el embed.
-    // Hacemos fetch DIRECTO al embed (CORS debe estar habilitado en el dominio o usar extensión)
-    console.log('[HLSWish] Fetch directo:', embedUrl);
-
-    const res = await fetch(embedUrl, { method: 'GET', mode: 'cors' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-
-    const html = await res.text();
-    console.log('[HLSWish] HTML recibido:', html.length, 'chars');
-
-    const origin = new URL(embedUrl).origin;
-    const media = extractHLSWishMedia(html, origin);
-
-    const order = ['hls4', 'hls2', 'hls3', 'regex'];
-    let m3u8Url = null;
-    for (let i = 0; i < order.length; i++) {
-      if (media.links[order[i]]) {
-        m3u8Url = media.links[order[i]];
-        console.log('[HLSWish] Usando ' + order[i] + ':', m3u8Url.substring(0, 90) + '...');
-        break;
-      }
-    }
-
-    if (!m3u8Url) {
-      console.error('[HLSWish] HTML preview:', html.substring(0, 800));
-      throw new Error('No se encontró master .m3u8 en el embed de HLSWish');
-    }
-
-    if (m3u8Url.startsWith('//')) m3u8Url = 'https:' + m3u8Url;
-    else if (m3u8Url.startsWith('/')) m3u8Url = origin + m3u8Url;
-
-    // Proxyar M3U8 y subtítulos por el Worker (el embed ya se resolvió directo)
-    const proxiedTracks = (media.captions || []).map(t => {
-      let file = t.file;
-      if (file.startsWith('//')) file = 'https:' + file;
-      else if (file.startsWith('/')) file = origin + file;
-      return {
-        ...t,
-        file: GOODSTREAM_WORKER + encodeURIComponent(file)
-      };
+    await fetch('https://server-api-resolved-video.onrender.com/health', {
+      method: 'GET',
+      mode: 'cors',
+      cache: 'no-cache',
     });
+  } catch (e) {
+    console.log('[HLSWish] Render despertando...');
+  }
 
-    console.log('[HLSWish] M3U8:', m3u8Url.substring(0, 80) + '...');
-    console.log('[HLSWish] Tracks:', proxiedTracks.length);
+  updateLoadingSubtext('Conectando con servidor de resolución...');
 
-    return {
-      title: VIDEO_TITLE,
-      type: 'hls',
-      url: m3u8Url,
-      rawUrl: m3u8Url,
-      proxyUrl: GOODSTREAM_WORKER + encodeURIComponent(m3u8Url),
-      tracks: proxiedTracks,
-      serverName: 'hlswish',
-      referer: embedUrl,
-      origin: origin,
-      useWorkerProxy: true,
-      workerUrl: GOODSTREAM_WORKER,
-      poster: media.image
-    };
+  const apiUrl = VIMEOS_RESOLVER_API + '?url=' + encodeURIComponent(embedUrl);
+  console.log('[HLSWish] API Playwright:', apiUrl);
 
+  const res = await fetch(apiUrl, {
+    method: 'GET',
+    mode: 'cors',
+    cache: 'no-cache',
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'HTTP ' + res.status }));
+    throw new Error(err.error || 'HTTP ' + res.status);
+  }
+
+  const data = await res.json();
+  console.log('[HLSWish] API response:', data);
+
+  if (!data.url) throw new Error('La API no devolvió URL del stream');
+
+  const directUrl = data.url;
+  const proxiedTracks = (data.tracks || []).map((t) => ({
+    ...t,
+    file: GOODSTREAM_WORKER + encodeURIComponent(t.file),
+  }));
+
+  return {
+    title: typeof VIDEO_TITLE !== 'undefined' ? VIDEO_TITLE : 'HLSWish',
+    type: 'hls',
+    url: directUrl,
+    rawUrl: directUrl,
+    proxyUrl: GOODSTREAM_WORKER + encodeURIComponent(directUrl),
+    tracks: proxiedTracks,
+    audioTracks: data.audioTracks || [],
+    serverName: 'hlswish',
+    referer: data.referer || embedUrl,
+    origin: null,
+    useWorkerProxy: true,
+    workerUrl: GOODSTREAM_WORKER,
+    poster: data.poster || null,
+  };
+}
+
+/**
+ * Resolución HLSWish: primero método del HTML (navegador + packer),
+ * si falla prueba la API Playwright.
+ */
+async function resolveHLSWish(embedUrl) {
+  try {
+    return await resolveHLSWishBrowser(embedUrl);
   } catch (err) {
-    console.error('[HLSWish] Error:', err);
-    throw err;
+    console.warn('[HLSWish] Método navegador falló:', err.message, '→ intentando API...');
+    updateLoadingSubtext('Fallback a API...');
+    try {
+      return await resolveHLSWishApi(embedUrl);
+    } catch (err2) {
+      console.error('[HLSWish] API también falló:', err2);
+      throw new Error('HLSWish: ' + err.message + ' | API: ' + err2.message);
+    }
   }
 }
 
@@ -396,6 +513,7 @@ async function resolveGoodStream(embedUrl) {
 
 // ─── RESOLUCIÓN GENÉRICA ────────────────────────────────────
 async function resolveEmbedInBrowser(embedUrl) {
+  embedUrl = normalizeEmbedUrl(embedUrl);
   const server = detectServer(embedUrl);
   if (!server) throw new Error('Servidor no soportado: ' + embedUrl);
 
