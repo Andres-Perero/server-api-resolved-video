@@ -196,7 +196,6 @@ function initSliders() {
 // SUBTÍTULOS (desde embed + HLS.js)
 // ═══════════════════════════════════════════════════════════════
 async function setupSubtitles(tracks, sourceInfo = {}) {
-  // Limpiar tracks anteriores
   Array.from(video.querySelectorAll('track')).forEach(t => {
     if (t.src && t.src.startsWith('blob:')) URL.revokeObjectURL(t.src);
     t.remove();
@@ -204,7 +203,6 @@ async function setupSubtitles(tracks, sourceInfo = {}) {
   subtitleOptions.innerHTML = '';
   addSubtitleOption('Desactivado', null, true);
 
-  // Separar tracks de subtítulos y audio
   const subtitleTracks = tracks.filter(t => {
     if (!t.file || t.file.includes('empty.srt') || t.file.includes('/srt/empty')) return false;
     if (t.kind === 'captions' || t.kind === 'subtitles') return true;
@@ -218,11 +216,8 @@ async function setupSubtitles(tracks, sourceInfo = {}) {
   console.log('[setupSubtitles] Subtitle tracks:', subtitleTracks.length);
   console.log('[setupSubtitles] Embed audio tracks:', embedAudioTracks.length);
 
-  // Detectar si estamos usando proxy del backend (Vimeos)
-  // En ese caso NO hacemos fetch para no matar la sesión/proxy
   const isApiProxied = sourceInfo.useApiProxy === true;
 
-  // Configurar subtítulos
   for (let i = 0; i < subtitleTracks.length; i++) {
     const t = subtitleTracks[i];
 
@@ -237,13 +232,10 @@ async function setupSubtitles(tracks, sourceInfo = {}) {
     trackEl.srclang = t.lang || 'es';
     trackEl.id = `track-${i}`;
 
-    // Si viene de API proxy (Vimeos), usar la URL directamente sin fetch
-    // El proxy del backend ya maneja CORS y la sesión
     if (isApiProxied) {
       trackEl.src = t.file;
       console.log('[setupSubtitles] Usando URL proxyada directa:', t.file.substring(0, 60));
     } else {
-      // GoodStream u otros: intentar fetch para crear blob y evitar CORS
       let useDirectUrl = true;
       try {
         console.log('[setupSubtitles] Intentando fetch:', t.file.substring(0, 60));
@@ -272,7 +264,6 @@ async function setupSubtitles(tracks, sourceInfo = {}) {
       }
     }
 
-    // Listener de error del track
     trackEl.addEventListener('error', (e) => {
       console.error('[Track Error]', t.label, e);
       const opt = subtitleOptions.querySelector(`[data-track-id="track-${i}"]`);
@@ -351,7 +342,6 @@ function closeSubtitleMenu() {
 // ═══════════════════════════════════════════════════════════════
 function setupAudioTracks(hlsInstance) {
   const hlsTracks = hlsInstance.audioTracks || [];
-
   const allTracks = [];
 
   hlsTracks.forEach(t => {
@@ -568,7 +558,6 @@ function focusIndex(i) {
 // INICIALIZAR EVENT LISTENERS
 // ═══════════════════════════════════════════════════════════════
 function initUI() {
-  // Video events
   video.addEventListener('play', updatePlayIcon);
   video.addEventListener('pause', updatePlayIcon);
   video.addEventListener('waiting', () => { showLoading('Cargando...'); showSeeking(); });
@@ -578,7 +567,6 @@ function initUI() {
   video.addEventListener('error', () => showError('Error reproduciendo video.'));
   video.addEventListener('click', () => { togglePlay(); showControls(); });
 
-  // Time updates
   video.addEventListener('timeupdate', () => {
     if (!video.duration) return;
     const pct = (video.currentTime / video.duration) * 100;
@@ -595,7 +583,6 @@ function initUI() {
     }
   });
 
-  // Botones
   btnPlayPause.addEventListener('click', togglePlay);
   btnPlayPause2.addEventListener('click', togglePlay);
   btnRewind.addEventListener('click', () => seekBy(-10));
@@ -610,7 +597,6 @@ function initUI() {
   btnFullscreen.addEventListener('click', toggleFullscreen);
   errorRetryBtn.addEventListener('click', () => initPlayer());
 
-  // Progress bar
   progressTrack.addEventListener('click', (e) => {
     const rect = progressTrack.getBoundingClientRect();
     const pct = (e.clientX - rect.left) / rect.width;
@@ -635,17 +621,14 @@ function initUI() {
   });
   progressTrack.addEventListener('mouseleave', () => progressTooltip.classList.remove('visible'));
 
-  // Volumen
   setVolume(1);
   volumeTrack.addEventListener('click', (e) => {
     const rect = volumeTrack.getBoundingClientRect();
     setVolume((e.clientX - rect.left) / rect.width);
   });
 
-  // Sliders settings
   initSliders();
 
-  // Keyboard
   document.addEventListener('keydown', (e) => {
     showControls();
     if (errorOverlay.classList.contains('visible')) {
@@ -678,7 +661,6 @@ function initUI() {
     }
   });
 
-  // Inicial
   showControls();
   refreshFocusables();
   focusIndex(1);
