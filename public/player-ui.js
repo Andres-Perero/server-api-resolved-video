@@ -497,11 +497,11 @@ function updatePlayIcon() {
   if (btnPlayPause) {
     btnPlayPause.classList.toggle('is-paused', paused);
     btnPlayPause.classList.toggle('is-playing', !paused);
-    btnPlayPause.setAttribute('title', paused ? 'Reproducir' : 'Pausar');
+    btnPlayPause.setAttribute('title', paused ? '' : '');
   }
   if (playPauseIcon2) playPauseIcon2.textContent = paused ? '▶' : '⏸';
   if (btnPlayPause2 && btnPlayPause2.lastElementChild) {
-    btnPlayPause2.lastElementChild.textContent = paused ? 'Reproducir' : 'Pausar';
+    btnPlayPause2.lastElementChild.textContent = paused ? '' : '';
   }
 }
 
