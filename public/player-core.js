@@ -346,16 +346,133 @@ async function resolveHLSWish(embedUrl) {
 // RESOLUCIÓN VIMEOS — via API Playwright (Render)
 // ═══════════════════════════════════════════════════════════════
 
-async function resolveVimeos(embedUrl) {
+async function resolveVimeosBrowser(embedUrl) {
   showLoading('Resolviendo Vimeos...');
+  updateLoadingSubtext('Desempaquetando embed...');
+
+  embedUrl = normalizeEmbedUrl(embedUrl);
+  console.log('[Vimeos] Embed normalizado:', embedUrl);
+
+  const workerUrl = GOODSTREAM_WORKER + encodeURIComponent(embedUrl);
+  console.log('[Vimeos] Worker embed:', workerUrl);
+
+  const res = await fetch(workerUrl);
+  if (!res.ok) throw new Error('Worker HTTP ' + res.status);
+
+  const html = await res.text();
+  console.log('[Vimeos] HTML recibido:', html.length, 'chars');
+
+  const pageOrigin = new URL(embedUrl).origin;
+  let m3u8Url = null;
+  const tracks = [];
+  let image = null;
+
+  // 1) Packer (mismo estilo que HLSWish / StreamHG)
+  const unpacked = unpackPacker(html);
+  if (unpacked) {
+    console.log('[Vimeos] Packer OK:', unpacked.length, 'chars');
+
+    // sources:[{file:"...m3u8"}]
+    const sourcesMatch = unpacked.match(/sources\s*:\s*\[\s*\{\s*file\s*:\s*"([^"]+\.m3u8[^"]*)"/i);
+    if (sourcesMatch) m3u8Url = sourcesMatch[1];
+
+    if (!m3u8Url) {
+      const fileMatch = unpacked.match(/file\s*:\s*"([^"]+\.m3u8[^"]*)"/i);
+      if (fileMatch) m3u8Url = fileMatch[1];
+    }
+
+    if (!m3u8Url) {
+      const gen = unpacked.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+      if (gen) m3u8Url = gen[1];
+    }
+
+    // tracks / captions
+    const tracksBlock = unpacked.match(/tracks\s*:\s*\[([^\]]+)\]/);
+    if (tracksBlock) {
+      const re =
+        /\{\s*file\s*:\s*"([^"]+)"\s*,\s*label\s*:\s*"([^"]+)"\s*,\s*kind\s*:\s*"([^"]+)"(?:\s*,\s*"?default"?\s*:\s*(true))?/g;
+      let tm;
+      while ((tm = re.exec(tracksBlock[1])) !== null) {
+        if (tm[3] === 'captions' || tm[3] === 'subtitles') {
+          tracks.push({
+            label: tm[2],
+            file: tm[1],
+            lang: /eng|en/i.test(tm[2]) ? 'en' : 'es',
+            kind: 'captions',
+            default: !!tm[4],
+          });
+        }
+      }
+    }
+
+    const img = unpacked.match(/image\s*:\s*"([^"]+)"/);
+    if (img) image = img[1];
+  }
+
+  // 2) Fallback regex sobre HTML crudo
+  if (!m3u8Url) {
+    const patterns = [
+      /file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i,
+      /sources\s*:\s*\[\s*\{[^}]*file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i,
+      /(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i,
+    ];
+    for (const pattern of patterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        m3u8Url = match[1].trim();
+        break;
+      }
+    }
+  }
+
+  if (!m3u8Url) {
+    console.error('[Vimeos] HTML preview:', html.substring(0, 600));
+    throw new Error('No se encontró .m3u8 en el embed de Vimeos');
+  }
+
+  if (m3u8Url.startsWith('//')) m3u8Url = 'https:' + m3u8Url;
+  else if (m3u8Url.startsWith('/')) m3u8Url = pageOrigin + m3u8Url;
+
+  console.log('[Vimeos] M3U8:', m3u8Url.substring(0, 100) + '...');
+  console.log('[Vimeos] Tracks:', tracks.length);
+
+  const proxiedTracks = tracks.map((t) => {
+    let file = t.file;
+    if (file.startsWith('//')) file = 'https:' + file;
+    else if (file.startsWith('/')) file = pageOrigin + file;
+    return {
+      ...t,
+      file: GOODSTREAM_WORKER + encodeURIComponent(file),
+    };
+  });
+
+  return {
+    title: typeof VIDEO_TITLE !== 'undefined' ? VIDEO_TITLE : 'Vimeos',
+    type: 'hls',
+    url: m3u8Url,
+    rawUrl: m3u8Url,
+    proxyUrl: GOODSTREAM_WORKER + encodeURIComponent(m3u8Url),
+    tracks: proxiedTracks,
+    audioTracks: [],
+    serverName: 'vimeos',
+    referer: embedUrl,
+    origin: pageOrigin,
+    useWorkerProxy: true,
+    workerUrl: GOODSTREAM_WORKER,
+    poster: image ? GOODSTREAM_WORKER + encodeURIComponent(image) : null,
+  };
+}
+
+/** Fallback API Playwright (requiere createSession en el servidor) */
+async function resolveVimeosApi(embedUrl) {
+  showLoading('Resolviendo Vimeos (API)...');
   updateLoadingSubtext('Despertando servidor...');
 
-  // Wake up Render (puede tardar 30-60s si está dormido)
   try {
-    await fetch('https://server-api-resolved-video.onrender.com/health', { 
+    await fetch('https://server-api-resolved-video.onrender.com/health', {
       method: 'GET',
       mode: 'cors',
-      cache: 'no-cache'
+      cache: 'no-cache',
     });
   } catch (e) {
     console.log('[Vimeos] Render despertando...');
@@ -363,61 +480,68 @@ async function resolveVimeos(embedUrl) {
 
   updateLoadingSubtext('Conectando con servidor de resolución...');
 
-  try {
-    const apiUrl = VIMEOS_RESOLVER_API + '?url=' + encodeURIComponent(embedUrl);
-    console.log('[Vimeos] Llamando API Playwright:', apiUrl);
+  const apiUrl = VIMEOS_RESOLVER_API + '?url=' + encodeURIComponent(normalizeEmbedUrl(embedUrl));
+  console.log('[Vimeos] API Playwright:', apiUrl);
 
-    const res = await fetch(apiUrl, {
-      method: 'GET',
-      mode: 'cors',
-      cache: 'no-cache',
-      headers: { 'Accept': 'application/json' }
-    });
+  const res = await fetch(apiUrl, {
+    method: 'GET',
+    mode: 'cors',
+    cache: 'no-cache',
+    headers: { Accept: 'application/json' },
+  });
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: 'HTTP ' + res.status }));
-      throw new Error(err.error || 'HTTP ' + res.status);
-    }
-
-    const data = await res.json();
-    console.log('[Vimeos] API response:', data);
-
-    if (!data.url) {
-      throw new Error('La API no devolvió URL del stream');
-    }
-
-    const directUrl = data.url;
-    const proxiedUrl = GOODSTREAM_WORKER + encodeURIComponent(directUrl);
-
-    const proxiedTracks = (data.tracks || []).map(t => ({
-      ...t,
-      file: GOODSTREAM_WORKER + encodeURIComponent(t.file)
-    }));
-
-    return {
-      title: VIDEO_TITLE,
-      type: 'hls',
-      url: directUrl,
-      rawUrl: directUrl,
-      proxyUrl: proxiedUrl,
-      tracks: proxiedTracks,
-      audioTracks: data.audioTracks || [],
-      serverName: 'vimeos',
-      referer: data.referer,
-      origin: null,
-      useWorkerProxy: true,
-      workerUrl: GOODSTREAM_WORKER
-    };
-
-  } catch (err) {
-    console.error('[Vimeos] Error:', err);
-    throw err;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'HTTP ' + res.status }));
+    throw new Error(err.error || 'HTTP ' + res.status);
   }
+
+  const data = await res.json();
+  console.log('[Vimeos] API response:', data);
+
+  if (!data.url) throw new Error('La API no devolvió URL del stream');
+
+  const directUrl = data.url;
+  const proxiedTracks = (data.tracks || []).map((t) => ({
+    ...t,
+    file: GOODSTREAM_WORKER + encodeURIComponent(t.file),
+  }));
+
+  return {
+    title: typeof VIDEO_TITLE !== 'undefined' ? VIDEO_TITLE : 'Vimeos',
+    type: 'hls',
+    url: directUrl,
+    rawUrl: directUrl,
+    proxyUrl: GOODSTREAM_WORKER + encodeURIComponent(directUrl),
+    tracks: proxiedTracks,
+    audioTracks: data.audioTracks || [],
+    serverName: 'vimeos',
+    referer: data.referer || embedUrl,
+    origin: null,
+    useWorkerProxy: true,
+    workerUrl: GOODSTREAM_WORKER,
+    poster: data.poster
+      ? GOODSTREAM_WORKER + encodeURIComponent(data.poster)
+      : null,
+  };
 }
 
-// ═══════════════════════════════════════════════════════════════
-// RESOLUCIÓN GOODSTREAM — via Worker Cloudflare
-// ═══════════════════════════════════════════════════════════════
+/**
+ * Vimeos: primero packer en el navegador (como HLSWish).
+ * La API Playwright queda de respaldo (ahora falla con createSession is not defined).
+ */
+async function resolveVimeos(embedUrl) {
+  try {
+    return await resolveVimeosBrowser(embedUrl);
+  } catch (err) {
+    console.warn('[Vimeos] Método navegador falló:', err.message, '→ intentando API...');
+    try {
+      return await resolveVimeosApi(embedUrl);
+    } catch (err2) {
+      console.error('[Vimeos] API también falló:', err2);
+      throw new Error('Vimeos: ' + err.message + ' | API: ' + err2.message);
+    }
+  }
+}
 
 async function resolveGoodStream(embedUrl) {
   showLoading('Resolviendo GoodStream...');
