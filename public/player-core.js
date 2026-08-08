@@ -699,10 +699,10 @@ function loadSource(source) {
 
     const hlsConfig = {
       maxBufferLength: 60,
-      maxMaxBufferLength: 120,
+      maxMaxBufferLength: 150,
       maxBufferSize: 60 * 1000 * 1000,
-      maxBufferHole: 2.0,
-      backBufferLength: 30,
+      maxBufferHole: 1.0,
+      backBufferLength: 90,
       maxFragLookUpTolerance: 0.25,
       startLevel: -1,
       abrEwmaDefaultEstimate: 500000,
@@ -712,16 +712,18 @@ function loadSource(source) {
       manifestLoadingRetryDelay: 1000,
       levelLoadingMaxRetry: 3,
       levelLoadingRetryDelay: 1000,
-      fragLoadingMaxRetry: 3,
-      fragLoadingRetryDelay: 1000,
+      fragLoadingMaxRetry: 6,
+      fragLoadingRetryDelay: 500,
       seekHoleNudgeDuration: 0.1,
       enableWorker: false,
       enableSoftwareAES: true,
       liveSyncDurationCount: 3,
       liveMaxLatencyDurationCount: 10,
       manifestLoadingTimeOut: 30000,
-      levelLoadingTimeOut: 30000,
-      fragLoadingTimeOut: 30000,
+      levelLoadingTimeOut: 20000,
+      fragLoadingTimeOut: 20000,
+      nudgeMaxRetry: 5,
+startFragPrefetch: true,
       loader: CustomLoader
     };
 
