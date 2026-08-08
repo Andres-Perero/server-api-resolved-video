@@ -202,8 +202,9 @@ async function resolveHLSWishBrowser(embedUrl) {
   const media = extractHLSWishMedia(html, pageOrigin);
   console.log('[HLSWish] Links hallados:', Object.keys(media.links), media.links);
 
-  // Preferir hls2 (CDN firmado, audio+video); hls4 como respaldo
-  const order = ['hls2', 'hls4', 'hls3', 'regex'];
+  // hls4 primero: mismo host hlswish (tokens de path).
+  // hls2 (premilkyway) suele dar 403 vía Worker porque el token va ligado a la IP del usuario, no a la del edge de CF.
+  const order = ['hls4', 'hls2', 'hls3', 'regex'];
   const candidates = [];
   for (const key of order) {
     if (media.links[key]) candidates.push({ key, url: media.links[key] });
@@ -255,7 +256,9 @@ async function resolveHLSWishBrowser(embedUrl) {
     origin: pageOrigin,
     useWorkerProxy: true,
     workerUrl: GOODSTREAM_WORKER,
-    poster: media.image || null,
+    poster: media.image
+      ? GOODSTREAM_WORKER + encodeURIComponent(media.image)
+      : null,
     duration: media.duration || null,
   };
 }
@@ -637,8 +640,37 @@ function loadSource(source) {
       if (data.fatal) {
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           const code = data.response?.code;
+
+          // Fallback a otro master (hls4 ↔ hls2 ↔ hls3) si el CDN rechaza el token/IP
+          if (
+            (code === 403 || code === 401 || data.details === 'manifestLoadError') &&
+            source.candidates &&
+            source.candidates.length > 1
+          ) {
+            const cur = source.rawUrl || source.url;
+            const idx = source.candidates.findIndex((u) => u === cur);
+            const next = source.candidates[idx + 1] || source.candidates.find((u) => u !== cur);
+            if (next && next !== cur) {
+              console.warn('[HLS] HTTP ' + code + ' → fallback master:', next.slice(0, 90));
+              showLoading('Reintentando con otro mirror...');
+              if (hls) {
+                try { hls.destroy(); } catch (e) {}
+                hls = null;
+              }
+              const nextSource = {
+                ...source,
+                url: next,
+                rawUrl: next,
+                proxyUrl: GOODSTREAM_WORKER + encodeURIComponent(next),
+                candidates: source.candidates.filter((u) => u !== cur),
+              };
+              setTimeout(() => loadSource(nextSource), 400);
+              return;
+            }
+          }
+
           if (code === 403 || code === 401) {
-            showError('Bloqueado (HTTP ' + code + '). El token expiró.');
+            showError('Bloqueado (HTTP ' + code + '). Token/IP del CDN. Prueba otro mirror o recarga.');
           } else if (code === 404) {
             showError('Video no encontrado (404).');
           } else if (code === 408 || (data.details && data.details.includes('TimeOut'))) {
