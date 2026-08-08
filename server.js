@@ -10,20 +10,37 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["*"] }));
+// ═══════════════════════════════════════════════════════════════
+// CORS FORZADO EN TODAS LAS RESPUESTAS (incluso errores)
+// ═══════════════════════════════════════════════════════════════
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD");
+  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.setHeader("Access-Control-Expose-Headers", "*");
+  next();
+});
+
+app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS", "HEAD"], allowedHeaders: ["*"], credentials: false }));
 app.use(express.static(path.join(__dirname, "public")));
+
+// Preflight OPTIONS para todas las rutas
+app.options("*", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD");
+  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.sendStatus(200);
+});
 
 // ═══════════════════════════════════════════════════════════════
 // SESIONES DE PLAYWRIGHT PERSISTENTES
-// Cada sesión = un navegador abierto con su propio contexto
 // ═══════════════════════════════════════════════════════════════
-const sessions = new Map(); // sessionId → { browser, context, page, referer, lastUsed }
+const sessions = new Map();
 
-// Limpiar sesiones inactivas cada 5 minutos
 setInterval(() => {
   const now = Date.now();
   for (const [id, session] of sessions.entries()) {
-    if (now - session.lastUsed > 15 * 60 * 1000) { // 15 minutos
+    if (now - session.lastUsed > 15 * 60 * 1000) {
       session.browser.close().catch(() => {});
       sessions.delete(id);
       console.log(`[SESSION] Eliminada sesión inactiva: ${id}`);
@@ -60,7 +77,6 @@ async function createSession(sessionId, embedUrl) {
 
   const page = await context.newPage();
 
-  // Bloquear ads, anti-devtool, trackers
   await page.route('**/*', (route) => {
     const url = route.request().url();
     if (VIMEOS_BLOCKED_PATTERNS.some((p) => url.includes(p))) {
@@ -77,11 +93,9 @@ async function createSession(sessionId, embedUrl) {
     }
   });
 
-  // Navegar al embed
   await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
   await page.waitForTimeout(2500);
 
-  // Cerrar interstitial
   const clickCandidates = ['text=Empezar desde el inicio', 'text=Continuar viendo', 'text=Resume'];
   for (const selector of clickCandidates) {
     const el = page.locator(selector).first();
@@ -91,13 +105,11 @@ async function createSession(sessionId, embedUrl) {
     }
   }
 
-  // Esperar JWPlayer
   await page.waitForFunction(
     () => { try { return typeof jwplayer === 'function' && jwplayer().getConfig?.(); } catch { return false; } },
     { timeout: 15000 }
   ).catch(() => {});
 
-  // Extraer datos del JWPlayer
   const mediaData = await page.evaluate(() => {
     try {
       const player = jwplayer();
@@ -131,7 +143,6 @@ async function createSession(sessionId, embedUrl) {
     return null;
   }
 
-  // Guardar sesión
   sessions.set(sessionId, { 
     browser, 
     context, 
@@ -152,15 +163,21 @@ async function createSession(sessionId, embedUrl) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ENDPOINT: Resolver embed (crea sesión persistente)
-// GET /api/resolve?url=https://vimeos.net/embed-xxx.html
+// ENDPOINT: Health check
+// ═══════════════════════════════════════════════════════════════
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString(), sessions: sessions.size });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ENDPOINT: Resolver embed
+// GET /api/resolve?url=...  o  ?embedUrl=...
 // ═══════════════════════════════════════════════════════════════
 app.get("/api/resolve", async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  const embedUrl = req.query.url;
+  const embedUrl = req.query.url || req.query.embedUrl;
 
   if (!embedUrl) {
-    return res.status(400).json({ error: 'Parámetro "url" requerido' });
+    return res.status(400).json({ error: 'Parámetro "url" o "embedUrl" requerido' });
   }
 
   try {
@@ -192,14 +209,10 @@ app.get("/api/resolve", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// ENDPOINT: Proxy CORS usando sesión de Playwright
+// ENDPOINT: Proxy CORS
 // GET /api/proxy?session=xxx&url=https://...
 // ═══════════════════════════════════════════════════════════════
 app.get("/api/proxy", async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "*");
-
   const sessionId = req.query.session;
   const targetUrl = req.query.url;
   const referer = req.query.referer;
@@ -208,8 +221,6 @@ app.get("/api/proxy", async (req, res) => {
     return res.status(400).json({ error: 'Parámetro "url" requerido' });
   }
 
-  // Si hay sesión, usar Playwright para hacer la petición
-  // Si no hay sesión, usar fetch normal (fallback)
   const session = sessionId ? sessions.get(sessionId) : null;
 
   try {
@@ -218,7 +229,6 @@ app.get("/api/proxy", async (req, res) => {
     let contentType;
 
     if (session) {
-      // USAR PLAYWRIGHT: la misma sesión que resolvió el embed
       session.lastUsed = Date.now();
 
       response = await session.page.evaluate(async (url) => {
@@ -249,7 +259,6 @@ app.get("/api/proxy", async (req, res) => {
       responseBody = Buffer.from(response.base64, 'base64');
 
     } else {
-      // FALLBACK: fetch normal con headers
       const fetchRes = await fetch(targetUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -270,7 +279,6 @@ app.get("/api/proxy", async (req, res) => {
 
     res.setHeader('Content-Type', contentType);
 
-    // ─── M3U8: reescribir TODAS las URLs ─────────────────────
     if (contentType.includes('mpegurl') || contentType.includes('m3u8') || targetUrl.includes('.m3u8')) {
       const text = responseBody.toString('utf-8');
 
@@ -299,12 +307,10 @@ app.get("/api/proxy", async (req, res) => {
       return res.send(lines.join('\n'));
     }
 
-    // ─── Subtítulos VTT/SRT ──────────────────────────────────
     if (contentType.includes('text/vtt') || contentType.includes('text/srt') || targetUrl.includes('.vtt') || targetUrl.includes('.srt')) {
       return res.send(responseBody.toString('utf-8'));
     }
 
-    // ─── Segmentos .ts, .m4s: stream binario ─────────────────
     res.setHeader('Content-Length', responseBody.length);
     res.send(responseBody);
 
@@ -314,23 +320,13 @@ app.get("/api/proxy", async (req, res) => {
   }
 });
 
-// Preflight CORS
-app.options('/api/proxy', (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-  res.sendStatus(200);
-});
-
-// ═══════════════════════════════════════════════════════════════
-// SPA fallback
-// ═══════════════════════════════════════════════════════════════
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Servidor activo en puerto ${PORT}`);
-  console.log(`📡 API Resolve: http://localhost:${PORT}/api/resolve?url=...`);
-  console.log(`📡 API Proxy:  http://localhost:${PORT}/api/proxy?session=...&url=...`);
+  console.log(`📡 Health:    http://localhost:${PORT}/health`);
+  console.log(`📡 Resolve:   http://localhost:${PORT}/api/resolve?url=...`);
+  console.log(`📡 Proxy:     http://localhost:${PORT}/api/proxy?session=...&url=...`);
 });
