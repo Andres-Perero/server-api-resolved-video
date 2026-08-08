@@ -1,12 +1,16 @@
 // ═══════════════════════════════════════════════════════════════
 // PLAYER-CORE.JS — Frontend Dual:
-// Vimeos: resolución via API backend (Playwright) + proxy del backend
+// Vimeos: resolución via API Playwright (Render) + proxy /api/stream
 // GoodStream: resolución via Worker Cloudflare
 // Directo: reproduce M3U8 directamente
 // ═══════════════════════════════════════════════════════════════
 
 // ─── CONFIGURACIÓN ──────────────────────────────────────────
-const API_BASE_URL = 'http://localhost:3000'; // ← Cambia esto
+// API de Playwright en Render (resolución con navegador real)
+const VIMEOS_RESOLVER_API = 'https://server-api-resolved-video.onrender.com/api/resolve';
+const VIMEOS_STREAM_PROXY = 'https://server-api-resolved-video.onrender.com/api/stream';
+
+// Worker de GoodStream
 const GOODSTREAM_WORKER = 'https://goodstream-proxy-render.ff15.workers.dev/?url=';
 
 // ─── ESTADO GLOBAL ───────────────────────────────────────────
@@ -47,7 +51,7 @@ function reportManifest(url, kind = 'hls', title = '') {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RESOLUCIÓN VIMEOS — via API Backend (Playwright)
+// RESOLUCIÓN VIMEOS — via API Playwright (Render) + /api/stream
 // ═══════════════════════════════════════════════════════════════
 
 async function resolveVimeos(embedUrl) {
@@ -55,8 +59,9 @@ async function resolveVimeos(embedUrl) {
   updateLoadingSubtext('Conectando con servidor de resolución...');
 
   try {
-    const apiUrl = API_BASE_URL + '/api/resolve?url=' + encodeURIComponent(embedUrl);
-    console.log('[Vimeos] Llamando API:', apiUrl);
+    // Tu API de Playwright espera ?embedUrl=
+    const apiUrl = VIMEOS_RESOLVER_API + '?embedUrl=' + encodeURIComponent(embedUrl);
+    console.log('[Vimeos] Llamando API Playwright:', apiUrl);
 
     const res = await fetch(apiUrl);
     if (!res.ok) {
@@ -71,28 +76,32 @@ async function resolveVimeos(embedUrl) {
       throw new Error('La API no devolvió URL del stream');
     }
 
-    const proxyUrl = API_BASE_URL + '/api/proxy?session=' + data.sessionId + '&url=';
-    const proxiedM3U8 = proxyUrl + encodeURIComponent(data.url);
+    // data.url ya viene proxyada por /api/stream
+    // Si no viene proxyada, la proxyamos nosotros
+    const proxiedUrl = data.url.includes('onrender.com') 
+      ? data.url 
+      : VIMEOS_STREAM_PROXY + '?url=' + encodeURIComponent(data.url);
 
+    // Proxyar también los tracks de subtítulos
     const proxiedTracks = (data.tracks || []).map(t => ({
       ...t,
-      file: proxyUrl + encodeURIComponent(t.file)
+      file: t.file.includes('onrender.com')
+        ? t.file
+        : VIMEOS_STREAM_PROXY + '?url=' + encodeURIComponent(t.file)
     }));
 
     return {
       title: VIDEO_TITLE,
       type: 'hls',
-      url: data.url,
-      rawUrl: data.url,
-      proxyUrl: proxiedM3U8,
-      tracks: proxiedTracks,
-      audioTracks: data.audioTracks || [],
+      url: data.rawUrl || data.url,           // URL directa original
+      rawUrl: data.rawUrl || data.url,        // URL directa extraída por Playwright
+      proxyUrl: proxiedUrl,                   // URL proxyada para reproducir
+      tracks: proxiedTracks,                  // Tracks con URLs proxyadas
       serverName: 'vimeos',
-      referer: data.referer,
+      referer: embedUrl,
       origin: null,
-      useApiProxy: true,
-      proxyBase: proxyUrl,
-      sessionId: data.sessionId,
+      useApiProxy: true,                      // Flag: usar proxy del API
+      proxyBase: VIMEOS_STREAM_PROXY + '?url='
     };
 
   } catch (err) {
@@ -119,6 +128,7 @@ async function resolveGoodStream(embedUrl) {
     const html = await res.text();
     console.log('[GoodStream] HTML recibido:', html.length, 'chars');
 
+    // Extraer M3U8
     let m3u8Url = null;
     const patterns = [
       /file\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i,
@@ -135,6 +145,7 @@ async function resolveGoodStream(embedUrl) {
       }
     }
 
+    // Fallback: scripts inline
     if (!m3u8Url) {
       const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi);
       if (scripts) {
@@ -156,9 +167,11 @@ async function resolveGoodStream(embedUrl) {
       throw new Error('No se encontró .m3u8 en el embed de GoodStream');
     }
 
+    // Normalizar URL
     if (m3u8Url.startsWith('//')) m3u8Url = 'https:' + m3u8Url;
     else if (m3u8Url.startsWith('/')) m3u8Url = new URL(embedUrl).origin + m3u8Url;
 
+    // Extraer tracks
     const tracks = [];
     const tracksMatch = html.match(/tracks\s*:\s*(\[\s*\{[\s\S]*?\}\s*\])/i);
     if (tracksMatch) {
@@ -215,12 +228,14 @@ async function resolveEmbedInBrowser(embedUrl) {
 // LOADERS PERSONALIZADOS
 // ═══════════════════════════════════════════════════════════════
 
+// Loader para GoodStream: proxya TODO por el Worker
 function createWorkerLoader(workerUrl) {
   return class extends Hls.DefaultConfig.loader {
     load(context, config, callbacks) {
       const url = context.url;
       if (url && url.includes('.m3u8')) reportManifest(url, 'hls', VIDEO_TITLE);
 
+      // Proxyar si no está ya proxyado
       if (url && !url.includes('workers.dev')) {
         context.url = workerUrl + encodeURIComponent(url);
       }
@@ -230,15 +245,20 @@ function createWorkerLoader(workerUrl) {
   };
 }
 
+// Loader para Vimeos via API Proxy: proxya TODO por /api/stream
 function createApiProxyLoader(proxyBase) {
   return class extends Hls.DefaultConfig.loader {
     load(context, config, callbacks) {
       const url = context.url;
       if (url && url.includes('.m3u8')) reportManifest(url, 'hls', VIDEO_TITLE);
 
-      if (url && !url.includes('/api/proxy')) {
-        context.url = proxyBase + encodeURIComponent(url);
+      // Si la URL ya está proxyada por Render, no hacer nada
+      if (url && url.includes('onrender.com')) {
+        return super.load(context, config, callbacks);
       }
+
+      // Proxyar todo lo demás
+      context.url = proxyBase + encodeURIComponent(url);
 
       return super.load(context, config, callbacks);
     }
@@ -261,11 +281,13 @@ function loadSource(source) {
     let loadUrl = source.proxyUrl || source.url;
 
     if (source.useWorkerProxy) {
+      // GoodStream: proxyar TODO por Worker
       CustomLoader = createWorkerLoader(GOODSTREAM_WORKER);
       console.log('[GoodStream] Proxyando via Worker');
     } else if (source.useApiProxy) {
+      // Vimeos: proxyar TODO por API /api/stream en Render
       CustomLoader = createApiProxyLoader(source.proxyBase);
-      console.log('[Vimeos] Proxyando via API');
+      console.log('[Vimeos] Proxyando via API Playwright (Render)');
     }
 
     const hlsConfig = {
@@ -300,6 +322,7 @@ function loadSource(source) {
     hls.loadSource(loadUrl);
     hls.attachMedia(video);
 
+    // Eventos
     hls.on(Hls.Events.MANIFEST_LOADED, (e, data) => {
       if (data.url) reportManifest(data.url, 'hls', source.title);
     });
@@ -354,6 +377,7 @@ function loadSource(source) {
     });
 
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    // Safari nativo
     video.src = source.proxyUrl || source.url;
     reportManifest(source.url, 'hls', source.title);
     video.addEventListener('loadedmetadata', () => {
@@ -366,8 +390,6 @@ function loadSource(source) {
   }
 
   updateServerBadge(source.serverName ? source.serverName.toUpperCase() : 'AUTO');
-  
-  // PASAMOS sourceInfo para que setupSubtitles sepa si usar proxy o fetch
   setupSubtitles(source.tracks || [], { useApiProxy: source.useApiProxy });
 }
 
