@@ -1,395 +1,241 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="es">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Reproductor Multi-Servidor</title>
-    <link rel="stylesheet" href="style.css" />
-    <base target="_blank" />
-  </head>
-  <body>
-    <div id="player-container">
-      <div id="video-wrapper">
-        <video id="video" playsinline crossorigin="anonymous"></video>
-      </div>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reproductor Multi-Servidor</title>
+<link rel="stylesheet" href="style.css">
+<base target="_blank">
+</head>
+<body>
 
-      <div id="loading-overlay">
-        <div class="spinner"></div>
-        <p id="loading-text">Cargando video...</p>
-        <p id="loading-subtext"></p>
-      </div>
+<div id="player-container">
+  <div id="video-wrapper">
+    <video id="video" playsinline crossorigin="anonymous"></video>
+  </div>
 
-      <div id="seeking-overlay">
-        <div class="seeking-spinner"></div>
-        <p>Buscando...</p>
-      </div>
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <p id="loading-text">Cargando video...</p>
+    <p id="loading-subtext"></p>
+  </div>
 
-      <div id="error-overlay">
-        <div class="error-icon">⚠️</div>
-        <h2>No se pudo reproducir el video</h2>
-        <p id="error-detail">
-          El servidor no respondió. Intenta con otro servidor o vuelve a
-          intentarlo.
-        </p>
-        <button id="error-retry-btn" class="focusable">Reintentar</button>
-      </div>
+  <div id="seeking-overlay">
+    <div class="seeking-spinner"></div>
+    <p>Buscando...</p>
+  </div>
 
-      <div id="seek-flash"></div>
-      <div id="toast"></div>
+  <div id="error-overlay">
+    <div class="error-icon">⚠️</div>
+    <h2>No se pudo reproducir el video</h2>
+    <p id="error-detail">El servidor no respondió. Intenta con otro servidor o vuelve a intentarlo.</p>
+    <button id="error-retry-btn" class="focusable">Reintentar</button>
+  </div>
 
-      <div id="controls-overlay">
-        <div id="top-bar">
-          <span id="video-title">Cargando título...</span>
-          <div id="video-info">
-            <span class="server-badge" id="server-badge">AUTO</span>
-            <span class="quality-badge" id="quality-badge">AUTO</span>
-          </div>
-        </div>
+  <div id="seek-flash"></div>
+  <div id="toast"></div>
 
-        <!-- Botones centrales actualizados con SVGs -->
-        <div id="center-controls">
-          <button
-            id="btn-rewind"
-            class="center-btn focusable"
-            title="Retroceder 10s"
-          >
-            <svg
-              class="center-svg"
-              viewBox="-4 0 20 20"
-              version="1.1"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <g
-                id="Free-Icons"
-                stroke="none"
-                stroke-width="1"
-                fill="none"
-                fill-rule="evenodd"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <g
-                  transform="translate(-825.000000, -674.000000)"
-                  id="Group"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <g transform="translate(819.000000, 672.000000)" id="Shape">
-                    <polyline
-                      points="17.0011615 3 7 12.0021033 17.0011615 21.0042067"
-                    ></polyline>
-                  </g>
-                </g>
-              </g>
-            </svg>
-          </button>
-
-          <button
-            id="btn-play-pause"
-            class="center-btn focusable is-paused"
-            title="Reproducir / Pausar"
-          >
-            <!-- play icon -->
-            <svg
-              class="icon-play"
-              width="800px"
-              height="800px"
-              viewBox="0 0 24 24"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                d="M21.4086 9.35258C23.5305 10.5065 23.5305 13.4935 21.4086 14.6474L8.59662 21.6145C6.53435 22.736 4 21.2763 4 18.9671L4 5.0329C4 2.72368 6.53435 1.26402 8.59661 2.38548L21.4086 9.35258Z"
-                fill="#1C274C"
-              />
-            </svg>
-            <!-- pause icon -->
-
-            <svg
-              class="icon-pause"
-              width="800px"
-              height="800px"
-              viewBox="0 0 24 24"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                d="M2 6C2 4.11438 2 3.17157 2.58579 2.58579C3.17157 2 4.11438 2 6 2C7.88562 2 8.82843 2 9.41421 2.58579C10 3.17157 10 4.11438 10 6V18C10 19.8856 10 20.8284 9.41421 21.4142C8.82843 22 7.88562 22 6 22C4.11438 22 3.17157 22 2.58579 21.4142C2 20.8284 2 19.8856 2 18V6Z"
-                fill="#1C274C"
-              />
-              <path
-                d="M14 6C14 4.11438 14 3.17157 14.5858 2.58579C15.1716 2 16.1144 2 18 2C19.8856 2 20.8284 2 21.4142 2.58579C22 3.17157 22 4.11438 22 6V18C22 19.8856 22 20.8284 21.4142 21.4142C20.8284 22 19.8856 22 18 22C16.1144 22 15.1716 22 14.5858 21.4142C14 20.8284 14 19.8856 14 18V6Z"
-                fill="#1C274C"
-              />
-            </svg>
-          </button>
-
-          <button
-            id="btn-forward"
-            class="center-btn focusable"
-            title="Adelantar 10s"
-          >
-            <svg
-              class="center-svg"
-              viewBox="-4 0 20 20"
-              version="1.1"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <g
-                id="Free-Icons"
-                stroke="none"
-                stroke-width="1"
-                fill="none"
-                fill-rule="evenodd"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <g
-                  transform="translate(-751.000000, -674.000000)"
-                  id="Group"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <g transform="translate(745.000000, 672.000000)" id="Shape">
-                    <polyline
-                      points="7 3 17.0011615 12.0021033 7 21.0042067"
-                    ></polyline>
-                  </g>
-                </g>
-              </g>
-            </svg>
-          </button>
-        </div>
-
-        <div id="bottom-bar">
-          <div id="progress-row">
-            <span id="time-current">0:00</span>
-            <div id="progress-track" class="focusable" tabindex="0">
-              <div id="progress-tooltip"></div>
-              <div id="progress-buffered"></div>
-              <div id="progress-fill"></div>
-              <div id="progress-thumb"></div>
-            </div>
-            <span id="time-duration">0:00</span>
-          </div>
-
-          <div id="buttons-row">
-            <button id="btn-play-pause-2" class="icon-btn focusable">
-              <span class="icon" id="play-pause-icon-2">▶</span
-              ><span>Reproducir</span>
-            </button>
-
-            <div id="volume-row">
-              <button id="btn-mute" class="icon-btn focusable">
-                <span class="icon" id="volume-icon">🔊</span>
-              </button>
-              <div id="volume-track" class="focusable" tabindex="0">
-                <div id="volume-fill"></div>
-              </div>
-            </div>
-
-            <div class="spacer"></div>
-
-            <button id="btn-audio-track" class="icon-btn focusable">
-              <span class="icon">🎧</span><span>Audio</span>
-            </button>
-
-            <button id="btn-subtitles" class="icon-btn focusable">
-              <span class="icon">💬</span><span>Subtítulos</span>
-            </button>
-
-            <button id="btn-video-settings" class="icon-btn focusable">
-              <span class="icon">🎨</span><span>Ajustes</span>
-            </button>
-
-            <button id="btn-fullscreen" class="icon-btn focusable">
-              <span class="icon">⛶</span><span>Pantalla completa</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div id="audio-menu" class="dropdown-menu">
-        <h3>🎧 Audio</h3>
-        <div id="audio-options"></div>
-      </div>
-
-      <div id="subtitle-menu" class="dropdown-menu">
-        <h3>💬 Subtítulos</h3>
-        <div id="subtitle-options"></div>
-      </div>
-
-      <div id="video-settings-menu" class="dropdown-menu">
-        <h3>🎨 Ajustes de Video</h3>
-
-        <div class="slider-control">
-          <label
-            >Brillo <span class="value" id="brightness-val">100%</span></label
-          >
-          <div
-            class="slider-track"
-            id="brightness-track"
-            data-setting="brightness"
-            data-min="0"
-            data-max="200"
-            data-default="100"
-          >
-            <div class="slider-fill" style="width: 50%"></div>
-            <div class="slider-thumb" style="left: 50%"></div>
-          </div>
-        </div>
-
-        <div class="slider-control">
-          <label
-            >Contraste <span class="value" id="contrast-val">100%</span></label
-          >
-          <div
-            class="slider-track"
-            id="contrast-track"
-            data-setting="contrast"
-            data-min="0"
-            data-max="200"
-            data-default="100"
-          >
-            <div class="slider-fill" style="width: 50%"></div>
-            <div class="slider-thumb" style="left: 50%"></div>
-          </div>
-        </div>
-
-        <div class="slider-control">
-          <label
-            >Saturación <span class="value" id="saturate-val">100%</span></label
-          >
-          <div
-            class="slider-track"
-            id="saturate-track"
-            data-setting="saturate"
-            data-min="0"
-            data-max="200"
-            data-default="100"
-          >
-            <div class="slider-fill" style="width: 50%"></div>
-            <div class="slider-thumb" style="left: 50%"></div>
-          </div>
-        </div>
-
-        <div class="slider-control">
-          <label>Tono (Hue) <span class="value" id="hue-val">0°</span></label>
-          <div
-            class="slider-track"
-            id="hue-track"
-            data-setting="hue-rotate"
-            data-min="-180"
-            data-max="180"
-            data-default="0"
-          >
-            <div class="slider-fill" style="width: 50%"></div>
-            <div class="slider-thumb" style="left: 50%"></div>
-          </div>
-        </div>
-
-        <div class="slider-control">
-          <label>Sepia <span class="value" id="sepia-val">0%</span></label>
-          <div
-            class="slider-track"
-            id="sepia-track"
-            data-setting="sepia"
-            data-min="0"
-            data-max="100"
-            data-default="0"
-          >
-            <div class="slider-fill" style="width: 0%"></div>
-            <div class="slider-thumb" style="left: 0%"></div>
-          </div>
-        </div>
-
-        <div class="slider-control">
-          <label
-            >Escala de Grises
-            <span class="value" id="grayscale-val">0%</span></label
-          >
-          <div
-            class="slider-track"
-            id="grayscale-track"
-            data-setting="grayscale"
-            data-min="0"
-            data-max="100"
-            data-default="0"
-          >
-            <div class="slider-fill" style="width: 0%"></div>
-            <div class="slider-thumb" style="left: 0%"></div>
-          </div>
-        </div>
-
-        <div class="slider-control">
-          <label>Invertir <span class="value" id="invert-val">0%</span></label>
-          <div
-            class="slider-track"
-            id="invert-track"
-            data-setting="invert"
-            data-min="0"
-            data-max="100"
-            data-default="0"
-          >
-            <div class="slider-fill" style="width: 0%"></div>
-            <div class="slider-thumb" style="left: 0%"></div>
-          </div>
-        </div>
-
-        <div class="settings-divider"></div>
-
-        <div style="padding: 0 14px">
-          <div class="preset-btn focusable" id="btn-reset-video">
-            ↺ Restaurar valores por defecto
-          </div>
-        </div>
-
-        <div style="padding: 0 14px; margin-top: 8px">
-          <div
-            style="font-size: 12px; color: var(--text-dim); margin-bottom: 6px"
-          >
-            Presets rápidos:
-          </div>
-          <div style="display: flex; gap: 8px; flex-wrap: wrap">
-            <div
-              class="preset-btn focusable"
-              data-preset="cinema"
-              style="flex: 1; font-size: 13px; padding: 6px"
-            >
-              🎬 Cine
-            </div>
-            <div
-              class="preset-btn focusable"
-              data-preset="warm"
-              style="flex: 1; font-size: 13px; padding: 6px"
-            >
-              ☀️ Cálido
-            </div>
-            <div
-              class="preset-btn focusable"
-              data-preset="cool"
-              style="flex: 1; font-size: 13px; padding: 6px"
-            >
-              ❄️ Frío
-            </div>
-            <div
-              class="preset-btn focusable"
-              data-preset="bw"
-              style="flex: 1; font-size: 13px; padding: 6px"
-            >
-              ⚫ B/N
-            </div>
-          </div>
-        </div>
+  <div id="controls-overlay">
+    <div id="top-bar">
+      <span id="video-title">Cargando título...</span>
+      <div id="video-info">
+        <span class="server-badge" id="server-badge">AUTO</span>
+        <span class="quality-badge" id="quality-badge">AUTO</span>
       </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    <script src="player-ui.js"></script>
-    <script src="player-core.js"></script>
-    <script>
-      initUI();
-      initPlayer();
-    </script>
-  </body>
+    <!-- Botones centrales actualizados con SVGs -->
+    <div id="center-controls">
+      <button id="btn-rewind" class="center-btn focusable" title="Retroceder 10s">
+        <svg class="center-svg" viewBox="-4 0 20 20" version="1.1" xmlns="http://www.w3.org/2000/svg">
+          <g id="Free-Icons" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" stroke-linecap="round" stroke-linejoin="round">
+            <g transform="translate(-825.000000, -674.000000)" id="Group" stroke="currentColor" stroke-width="2">
+              <g transform="translate(819.000000, 672.000000)" id="Shape">
+                <polyline points="17.0011615 3 7 12.0021033 17.0011615 21.0042067"></polyline>
+              </g>
+            </g>
+          </g>
+        </svg>
+      </button>
+
+      <button id="btn-play-pause" class="center-btn focusable is-paused" title="Reproducir / Pausar">
+        <!-- play icon -->
+        <svg class="icon-play" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M21 12C21 16.9706 16.9706 21 12 21C7.02944 21 3 16.9706 3 12C3 7.02944 7.02944 3 12 3C16.9706 3 21 7.02944 21 12Z" stroke="currentColor" stroke-width="2"/>
+          <path d="M10.9 8.8L10.6577 8.66152C10.1418 8.36676 9.5 8.73922 9.5 9.33333L9.5 14.6667C9.5 15.2608 10.1418 15.6332 10.6577 15.3385L10.9 15.2L15.1 12.8C15.719 12.4463 15.719 11.5537 15.1 11.2L10.9 8.8Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <!-- pause icon -->
+        <svg class="icon-pause" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M21 12C21 16.9706 16.9706 21 12 21C7.02944 21 3 16.9706 3 12C3 7.02944 7.02944 3 12 3C16.9706 3 21 7.02944 21 12Z" stroke="currentColor" stroke-width="2"/>
+          <path d="M9.5 8.5h2v7h-2v-7zm3 0h2v7h-2v-7z" fill="currentColor" stroke="none"/>
+        </svg>
+      </button>
+
+      <button id="btn-forward" class="center-btn focusable" title="Adelantar 10s">
+        <svg class="center-svg" viewBox="-4 0 20 20" version="1.1" xmlns="http://www.w3.org/2000/svg">
+          <g id="Free-Icons" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd" stroke-linecap="round" stroke-linejoin="round">
+            <g transform="translate(-751.000000, -674.000000)" id="Group" stroke="currentColor" stroke-width="2">
+              <g transform="translate(745.000000, 672.000000)" id="Shape">
+                <polyline points="7 3 17.0011615 12.0021033 7 21.0042067"></polyline>
+              </g>
+            </g>
+          </g>
+        </svg>
+      </button>
+    </div>
+
+    <div id="bottom-bar">
+      <div id="progress-row">
+        <span id="time-current">0:00</span>
+        <div id="progress-track" class="focusable" tabindex="0">
+          <div id="progress-tooltip"></div>
+          <div id="progress-buffered"></div>
+          <div id="progress-fill"></div>
+          <div id="progress-thumb"></div>
+        </div>
+        <span id="time-duration">0:00</span>
+      </div>
+
+      <div id="buttons-row">
+        <button id="btn-play-pause-2" class="icon-btn focusable">
+          <span class="icon" id="play-pause-icon-2">▶</span><span>Reproducir</span>
+        </button>
+
+        <div id="volume-row">
+          <button id="btn-mute" class="icon-btn focusable"><span class="icon" id="volume-icon">🔊</span></button>
+          <div id="volume-track" class="focusable" tabindex="0"><div id="volume-fill"></div></div>
+          <button id="btn-volume-boost" class="icon-btn focusable" title="Volume Booster">
+            <span class="icon">🔊+</span><span id="boost-label">Boost</span>
+          </button>
+        </div>
+
+        <div class="spacer"></div>
+
+        <button id="btn-audio-track" class="icon-btn focusable">
+          <span class="icon">🎧</span><span>Audio</span>
+        </button>
+
+        <button id="btn-subtitles" class="icon-btn focusable">
+          <span class="icon">💬</span><span>Subtítulos</span>
+        </button>
+
+        <button id="btn-video-settings" class="icon-btn focusable">
+          <span class="icon">🎨</span><span>Ajustes</span>
+        </button>
+
+        <button id="btn-fullscreen" class="icon-btn focusable">
+          <span class="icon">⛶</span><span>Pantalla completa</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div id="audio-menu" class="dropdown-menu">
+    <h3>🎧 Audio</h3>
+    <div id="audio-options"></div>
+  </div>
+
+  <div id="subtitle-menu" class="dropdown-menu">
+    <h3>💬 Subtítulos</h3>
+    <div id="subtitle-options"></div>
+  </div>
+
+  <div id="video-settings-menu" class="dropdown-menu">
+    <h3>🎨 Ajustes de Video</h3>
+
+    <div class="slider-control">
+      <label>Brillo <span class="value" id="brightness-val">100%</span></label>
+      <div class="slider-track" id="brightness-track" data-setting="brightness" data-min="0" data-max="200" data-default="100">
+        <div class="slider-fill" style="width:50%"></div>
+        <div class="slider-thumb" style="left:50%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Contraste <span class="value" id="contrast-val">100%</span></label>
+      <div class="slider-track" id="contrast-track" data-setting="contrast" data-min="0" data-max="200" data-default="100">
+        <div class="slider-fill" style="width:50%"></div>
+        <div class="slider-thumb" style="left:50%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Saturación <span class="value" id="saturate-val">100%</span></label>
+      <div class="slider-track" id="saturate-track" data-setting="saturate" data-min="0" data-max="200" data-default="100">
+        <div class="slider-fill" style="width:50%"></div>
+        <div class="slider-thumb" style="left:50%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Tono (Hue) <span class="value" id="hue-val">0°</span></label>
+      <div class="slider-track" id="hue-track" data-setting="hue-rotate" data-min="-180" data-max="180" data-default="0">
+        <div class="slider-fill" style="width:50%"></div>
+        <div class="slider-thumb" style="left:50%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Sepia <span class="value" id="sepia-val">0%</span></label>
+      <div class="slider-track" id="sepia-track" data-setting="sepia" data-min="0" data-max="100" data-default="0">
+        <div class="slider-fill" style="width:0%"></div>
+        <div class="slider-thumb" style="left:0%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Escala de Grises <span class="value" id="grayscale-val">0%</span></label>
+      <div class="slider-track" id="grayscale-track" data-setting="grayscale" data-min="0" data-max="100" data-default="0">
+        <div class="slider-fill" style="width:0%"></div>
+        <div class="slider-thumb" style="left:0%"></div>
+      </div>
+    </div>
+
+    <div class="slider-control">
+      <label>Invertir <span class="value" id="invert-val">0%</span></label>
+      <div class="slider-track" id="invert-track" data-setting="invert" data-min="0" data-max="100" data-default="0">
+        <div class="slider-fill" style="width:0%"></div>
+        <div class="slider-thumb" style="left:0%"></div>
+      </div>
+    </div>
+
+    <div class="settings-divider"></div>
+
+    <div style="padding:0 14px;">
+      <div class="preset-btn focusable" id="btn-reset-video">↺ Restaurar valores por defecto</div>
+    </div>
+
+    <div style="padding:0 14px; margin-top:8px;">
+      <div style="font-size:12px; color:var(--text-dim); margin-bottom:6px;">Presets rápidos:</div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <div class="preset-btn focusable" data-preset="cinema" style="flex:1; font-size:13px; padding:6px;">🎬 Cine</div>
+        <div class="preset-btn focusable" data-preset="warm" style="flex:1; font-size:13px; padding:6px;">☀️ Cálido</div>
+        <div class="preset-btn focusable" data-preset="cool" style="flex:1; font-size:13px; padding:6px;">❄️ Frío</div>
+        <div class="preset-btn focusable" data-preset="bw" style="flex:1; font-size:13px; padding:6px;">⚫ B/N</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+  <div id="volume-boost-menu" class="dropdown-menu">
+    <h3>🔊 Volume Booster</h3>
+    <p class="menu-hint">Amplifica por encima del 100% del sistema</p>
+    <div id="boost-options">
+      <div class="menu-option focusable active" data-boost="1"><span>Off (100%)</span><span class="check">✓</span></div>
+      <div class="menu-option focusable" data-boost="1.25"><span>+25% (125%)</span><span class="check">✓</span></div>
+      <div class="menu-option focusable" data-boost="1.5"><span>+50% (150%)</span><span class="check">✓</span></div>
+      <div class="menu-option focusable" data-boost="1.75"><span>+75% (175%)</span><span class="check">✓</span></div>
+      <div class="menu-option focusable" data-boost="2"><span>+100% (200%)</span><span class="check">✓</span></div>
+    </div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script src="player-ui.js"></script>
+<script src="player-core.js"></script>
+<script>
+  initUI();
+  initPlayer();
+</script>
+</body>
 </html>

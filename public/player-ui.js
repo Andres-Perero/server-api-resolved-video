@@ -45,6 +45,10 @@ const timeDuration = document.getElementById('time-duration');
 
 const volumeTrack = document.getElementById('volume-track');
 const volumeFill = document.getElementById('volume-fill');
+const btnVolumeBoost = document.getElementById('btn-volume-boost');
+const volumeBoostMenu = document.getElementById('volume-boost-menu');
+const boostLabel = document.getElementById('boost-label');
+const boostOptions = document.getElementById('boost-options');
 
 const subtitleMenu = document.getElementById('subtitle-menu');
 const subtitleOptions = document.getElementById('subtitle-options');
@@ -59,6 +63,12 @@ let controlsHideTimer = null;
 let subtitleMenuOpen = false;
 let audioMenuOpen = false;
 let videoSettingsOpen = false;
+let volumeBoostOpen = false;
+let volumeBoostFactor = 1; // 1 = off, 2 = +100%
+let audioCtx = null;
+let gainNode = null;
+let mediaSourceNode = null;
+let audioGraphReady = false;
 let isSeeking = false;
 let seekDebounceTimer = null;
 let focusables = [];
@@ -470,6 +480,7 @@ function closeOtherMenus(except) {
   if (except !== 'subtitle') closeSubtitleMenu();
   if (except !== 'audio') closeAudioMenu();
   if (except !== 'video-settings') closeVideoSettingsMenu();
+  if (except !== 'volume-boost') closeVolumeBoostMenu();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -519,11 +530,207 @@ function formatTime(sec) {
 // ═══════════════════════════════════════════════════════════════
 // VOLUMEN
 // ═══════════════════════════════════════════════════════════════
+/** Web Audio: permite ganar > 100% (HTML video.max = 1.0) */
+function ensureAudioGraph() {
+  if (audioGraphReady && gainNode) return true;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) {
+      console.warn('[VolumeBoost] AudioContext no disponible');
+      return false;
+    }
+    if (!audioCtx) audioCtx = new AC();
+    if (!mediaSourceNode) {
+      // Solo se puede crear UNA vez por elemento <video>
+      mediaSourceNode = audioCtx.createMediaElementSource(video);
+      gainNode = audioCtx.createGain();
+      gainNode.gain.value = volumeBoostFactor;
+      mediaSourceNode.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+    }
+    audioGraphReady = true;
+    console.log('[VolumeBoost] Audio graph listo, factor=', volumeBoostFactor);
+    return true;
+  } catch (err) {
+    console.warn('[VolumeBoost] No se pudo crear AudioContext:', err.message);
+    return false;
+  }
+}
+
+async function resumeAudioCtx() {
+  if (audioCtx && audioCtx.state === 'suspended') {
+    try { await audioCtx.resume(); } catch (e) {}
+  }
+}
+
+function applyVolumeBoost(factor) {
+  volumeBoostFactor = Math.max(1, Math.min(2, Number(factor) || 1));
+  if (volumeBoostFactor > 1) {
+    ensureAudioGraph();
+    resumeAudioCtx();
+  }
+  if (gainNode) {
+    // Suave para no petar el oído
+    const now = audioCtx ? audioCtx.currentTime : 0;
+    try {
+      gainNode.gain.cancelScheduledValues(now);
+      gainNode.gain.setTargetAtTime(volumeBoostFactor, now, 0.03);
+    } catch (e) {
+      gainNode.gain.value = volumeBoostFactor;
+    }
+  }
+  // UI label
+  if (boostLabel) {
+    if (volumeBoostFactor <= 1) boostLabel.textContent = 'Boost';
+    else boostLabel.textContent = '+' + Math.round((volumeBoostFactor - 1) * 100) + '%';
+  }
+  if (btnVolumeBoost) {
+    btnVolumeBoost.classList.toggle('boost-active', volumeBoostFactor > 1);
+  }
+  // Marcar opción activa en menú
+  if (boostOptions) {
+    Array.from(boostOptions.querySelectorAll('.menu-option')).forEach((el) => {
+      const b = parseFloat(el.dataset.boost);
+      el.classList.toggle('active', Math.abs(b - volumeBoostFactor) < 0.01);
+    });
+  }
+  // Icono volumen refleja boost
+  updateVolumeIcon();
+}
+
+function updateVolumeIcon() {
+  if (video.muted || video.volume === 0) {
+    volumeIcon.textContent = '🔇';
+  } else if (volumeBoostFactor > 1) {
+    volumeIcon.textContent = '📢';
+  } else if (video.volume < 0.5) {
+    volumeIcon.textContent = '🔉';
+  } else {
+    volumeIcon.textContent = '🔊';
+  }
+}
+
 function setVolume(v) {
-  video.volume = Math.min(1, Math.max(0, v));
-  video.muted = video.volume === 0;
-  volumeFill.style.width = (video.volume * 100) + '%';
-  volumeIcon.textContent = video.muted || video.volume === 0 ? '🔇' : video.volume < 0.5 ? '🔉' : '🔊';
+  const vol = Math.min(1, Math.max(0, Number(v) || 0));
+  video.volume = vol;
+  if (vol > 0) video.muted = false;
+  if (volumeFill) volumeFill.style.width = (vol * 100) + '%';
+  if (volumeTrack) volumeTrack.style.setProperty('--vol-pct', (vol * 100) + '%');
+  updateVolumeIcon();
+  if (volumeBoostFactor > 1) {
+    ensureAudioGraph();
+    resumeAudioCtx();
+  }
+}
+
+function toggleVolumeBoostMenu() {
+  volumeBoostOpen = !volumeBoostOpen;
+  if (volumeBoostMenu) volumeBoostMenu.classList.toggle('visible', volumeBoostOpen);
+  if (volumeBoostOpen) {
+    closeOtherMenus('volume-boost');
+    refreshFocusables();
+    const first = boostOptions && boostOptions.firstElementChild;
+    if (first) focusIndex(focusables.indexOf(first));
+  }
+}
+
+function closeVolumeBoostMenu() {
+  volumeBoostOpen = false;
+  if (volumeBoostMenu) volumeBoostMenu.classList.remove('visible');
+  refreshFocusables();
+}
+
+/** Barra de volumen: click + arrastre (mouse/touch/pointer) */
+function initVolumeSlider() {
+  if (!volumeTrack) return;
+
+  let dragging = false;
+
+  function volumeFromEvent(e) {
+    const point = e.touches && e.touches[0]
+      ? e.touches[0]
+      : (e.changedTouches && e.changedTouches[0] ? e.changedTouches[0] : e);
+    const clientX = point.clientX != null ? point.clientX : 0;
+    const rect = volumeTrack.getBoundingClientRect();
+    if (!rect.width) return video.volume;
+    const pct = (clientX - rect.left) / rect.width;
+    return Math.min(1, Math.max(0, pct));
+  }
+
+  function onDown(e) {
+    // Evitar que el navegador haga scroll o selección
+    if (e.cancelable) e.preventDefault();
+    dragging = true;
+    volumeTrack.classList.add('dragging');
+    setVolume(volumeFromEvent(e));
+    showControls();
+  }
+
+  function onMove(e) {
+    if (!dragging) return;
+    if (e.cancelable) e.preventDefault();
+    setVolume(volumeFromEvent(e));
+    showControls();
+  }
+
+  function onUp() {
+    if (!dragging) return;
+    dragging = false;
+    volumeTrack.classList.remove('dragging');
+  }
+
+  // Pointer Events (mouse + stylus + touch modernos)
+  volumeTrack.addEventListener('pointerdown', (e) => {
+    try { volumeTrack.setPointerCapture(e.pointerId); } catch (_) {}
+    onDown(e);
+  });
+  volumeTrack.addEventListener('pointermove', onMove);
+  volumeTrack.addEventListener('pointerup', onUp);
+  volumeTrack.addEventListener('pointercancel', onUp);
+  volumeTrack.addEventListener('lostpointercapture', onUp);
+
+  // Fallback touch (iOS antiguos)
+  volumeTrack.addEventListener('touchstart', onDown, { passive: false });
+  volumeTrack.addEventListener('touchmove', onMove, { passive: false });
+  volumeTrack.addEventListener('touchend', onUp);
+  volumeTrack.addEventListener('touchcancel', onUp);
+
+  // Teclado en la barra
+  volumeTrack.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      setVolume(video.volume + 0.05);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      setVolume(video.volume - 0.05);
+    }
+  });
+}
+
+function initVolumeBoost() {
+  if (!boostOptions) return;
+
+  boostOptions.querySelectorAll('.menu-option').forEach((el) => {
+    el.addEventListener('click', async () => {
+      const factor = parseFloat(el.dataset.boost) || 1;
+      ensureAudioGraph();
+      await resumeAudioCtx();
+      applyVolumeBoost(factor);
+      showToast(
+        factor <= 1
+          ? 'Volume Booster: Off'
+          : 'Volume Booster: +' + Math.round((factor - 1) * 100) + '%'
+      );
+      closeVolumeBoostMenu();
+    });
+  });
+
+  if (btnVolumeBoost) {
+    btnVolumeBoost.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleVolumeBoostMenu();
+    });
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -546,7 +753,7 @@ function showControls() {
   document.getElementById('player-container')?.classList.remove('controls-hidden');
   clearTimeout(controlsHideTimer);
   controlsHideTimer = setTimeout(() => {
-    if (!video.paused && !subtitleMenuOpen && !audioMenuOpen && !videoSettingsOpen) {
+    if (!video.paused && !subtitleMenuOpen && !audioMenuOpen && !videoSettingsOpen && !volumeBoostOpen) {
       controlsOverlay.classList.add('hidden');
       document.getElementById('player-container')?.classList.add('controls-hidden');
     }
@@ -578,6 +785,7 @@ function refreshFocusables() {
   if (subtitleMenuOpen) scope = subtitleMenu;
   else if (audioMenuOpen) scope = audioMenu;
   else if (videoSettingsOpen) scope = videoSettingsMenu;
+  else if (volumeBoostOpen) scope = volumeBoostMenu;
   else scope = controlsOverlay;
   focusables = Array.from(scope.querySelectorAll('.focusable')).filter(el => el.offsetParent !== null);
   if (focusIdx >= focusables.length) focusIdx = 0;
@@ -627,7 +835,7 @@ function initUI() {
   btnForward.addEventListener('click', () => seekBy(10));
   btnMute.addEventListener('click', () => {
     video.muted = !video.muted;
-    volumeIcon.textContent = video.muted ? '🔇' : '🔊';
+    updateVolumeIcon();
   });
   btnSubtitles.addEventListener('click', toggleSubtitleMenu);
   btnAudioTrack.addEventListener('click', toggleAudioMenu);
@@ -660,10 +868,7 @@ function initUI() {
   progressTrack.addEventListener('mouseleave', () => progressTooltip.classList.remove('visible'));
 
   setVolume(1);
-  volumeTrack.addEventListener('click', (e) => {
-    const rect = volumeTrack.getBoundingClientRect();
-    setVolume((e.clientX - rect.left) / rect.width);
-  });
+  initVolumeSlider();
 
   initSliders();
 
@@ -675,10 +880,10 @@ function initUI() {
     }
     switch (e.key) {
       case 'ArrowRight':
-        if (subtitleMenuOpen || audioMenuOpen || videoSettingsOpen) return;
+        if (subtitleMenuOpen || audioMenuOpen || videoSettingsOpen || volumeBoostOpen) return;
         seekBy(10); break;
       case 'ArrowLeft':
-        if (subtitleMenuOpen || audioMenuOpen || videoSettingsOpen) return;
+        if (subtitleMenuOpen || audioMenuOpen || videoSettingsOpen || volumeBoostOpen) return;
         seekBy(-10); break;
       case 'ArrowUp':
         e.preventDefault(); refreshFocusables(); focusIndex(focusIdx - 1); break;
@@ -693,6 +898,7 @@ function initUI() {
         if (subtitleMenuOpen) closeSubtitleMenu();
         else if (audioMenuOpen) closeAudioMenu();
         else if (videoSettingsOpen) closeVideoSettingsMenu();
+        else if (volumeBoostOpen) closeVolumeBoostMenu();
         else if (document.fullscreenElement) document.exitFullscreen();
         break;
       case 'MediaPlayPause': togglePlay(); break;

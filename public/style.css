@@ -282,15 +282,56 @@ video{
 /* Volumen */
 #volume-row{ display:flex; align-items:center; gap:10px; }
 #volume-track{
-  width:100px; height:5px;
+  width:110px;
+  height:6px;
   background:rgba(255,255,255,0.25);
   border-radius:4px;
   position:relative;
+  cursor:pointer;
+  /* zona de toque más grande sin cambiar el look */
+  touch-action: none;
+  user-select: none;
+}
+#volume-track::before{
+  content:"";
+  position:absolute;
+  left:-6px; right:-6px;
+  top:50%;
+  transform:translateY(-50%);
+  height:28px; /* hit area */
 }
 #volume-fill{
   position:absolute; top:0; left:0; height:100%;
   background:#fff;
   border-radius:4px;
+  pointer-events:none;
+}
+#volume-track::after{
+  /* thumb */
+  content:"";
+  position:absolute;
+  top:50%;
+  left:var(--vol-pct, 100%);
+  width:14px; height:14px;
+  background:#fff;
+  border-radius:50%;
+  transform:translate(-50%,-50%) scale(0);
+  transition:transform .12s ease;
+  pointer-events:none;
+  box-shadow:0 0 0 2px rgba(0,0,0,0.35);
+}
+#volume-track:hover::after,
+#volume-track.dragging::after,
+#volume-track.focused::after{
+  transform:translate(-50%,-50%) scale(1);
+}
+#volume-track.dragging{
+  cursor:grabbing;
+}
+#volume-track.focused{
+  outline:none;
+  box-shadow:0 0 0 2px var(--focus-ring);
+  border-radius:6px;
 }
 
 /* ─── Menús desplegables ─────────────────────────────── */
@@ -612,5 +653,38 @@ video::cue{
   .center-btn {
     min-width: 48px;
     min-height: 48px;
+  }
+}
+
+
+/* ─── Volume Booster ────────────────────────────────────────── */
+#btn-volume-boost.boost-active {
+  color: #ff9100;
+  border-color: rgba(255,145,0,0.5);
+  background: rgba(255,145,0,0.12);
+}
+#btn-volume-boost.boost-active .icon {
+  filter: drop-shadow(0 0 4px rgba(255,145,0,0.6));
+}
+#volume-boost-menu {
+  left: 48px;
+  bottom: 150px;
+  min-width: 240px;
+}
+#volume-boost-menu .menu-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 0 12px 10px;
+  line-height: 1.35;
+}
+@media (max-width: 900px) {
+  #volume-boost-menu {
+    left: 12px;
+    right: 12px;
+    bottom: 88px;
+    min-width: 0;
+  }
+  #boost-label {
+    display: none;
   }
 }
