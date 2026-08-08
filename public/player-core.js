@@ -1,7 +1,8 @@
 // ═══════════════════════════════════════════════════════════════
-// PLAYER-CORE.JS — Frontend Dual:
+// PLAYER-CORE.JS — Frontend Multi-Servidor:
 // Vimeos: resolución via API Playwright (Render) → URL directa
 // GoodStream: resolución via Worker Cloudflare
+// HLSWish: resolución via desempaquetado de packer JS (fetch directo)
 // Directo: reproduce M3U8 directamente
 // ═══════════════════════════════════════════════════════════════
 
@@ -9,7 +10,7 @@
 // API de Playwright en Render (SOLO para resolución, NO para proxy)
 const VIMEOS_RESOLVER_API = 'https://server-api-resolved-video.onrender.com/api/resolve';
 
-// Worker de GoodStream (también sirve como proxy CORS para Vimeos)
+// Worker de GoodStream (sirve como proxy CORS para Vimeos, GoodStream y HLSWish M3U8/segmentos)
 const GOODSTREAM_WORKER = 'https://goodstream-proxy-render.ff15.workers.dev/?url=';
 
 // ─── ESTADO GLOBAL ───────────────────────────────────────────
@@ -22,6 +23,7 @@ function detectServer(url) {
   if (!url) return null;
   if (url.includes('goodstream')) return 'goodstream';
   if (url.includes('vimeos')) return 'vimeos';
+  if (url.includes('hlswish') || url.includes('streamwish')) return 'hlswish';
   return null;
 }
 
@@ -50,8 +52,178 @@ function reportManifest(url, kind = 'hls', title = '') {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// DESMPAQUETADO DE PACKER JS (HLSWish)
+// ═══════════════════════════════════════════════════════════════
+
+function unpackPacker(html) {
+  const m = html.match(
+    /eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace\(new RegExp\('\\b'\+c\.toString\(a\)\+'\\b','g'\),k\[c\]\);return p\}\('((?:\\'|[^'])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:\\'|[^'])*)'\.split\('\|'\)/
+  );
+  if (!m) return null;
+
+  const p = m[1];
+  const a = parseInt(m[2], 10);
+  const c = parseInt(m[3], 10);
+  const k = m[4].split('|');
+
+  function toBase(n, base) {
+    if (n === 0) return '0';
+    const digits = '0123456789abcdefghijklmnopqrstuvwxyz';
+    let s = '';
+    while (n) {
+      s = digits[n % base] + s;
+      n = Math.floor(n / base);
+    }
+    return s;
+  }
+
+  let result = p;
+  for (let i = c - 1; i >= 0; i--) {
+    if (i < k.length && k[i]) {
+      const token = toBase(i, a);
+      result = result.replace(
+        new RegExp('\\b' + token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'g'),
+        k[i]
+      );
+    }
+  }
+  return result;
+}
+
+function extractHLSWishMedia(html, pageOrigin) {
+  const result = { links: {}, captions: [], image: null, duration: null };
+
+  const unpacked = unpackPacker(html);
+  if (unpacked) {
+    console.log('[HLSWish] Packer desempaquetado (' + unpacked.length + ' chars)');
+
+    const linksMatch = unpacked.match(/links\s*=\s*\{([^}]+)\}/);
+    if (linksMatch) {
+      ['hls2', 'hls3', 'hls4'].forEach(function (key) {
+        const km = linksMatch[1].match(new RegExp('"' + key + '"\s*:\s*"([^"]+)"'));
+        if (km) {
+          let u = km[1];
+          if (u.startsWith('/')) u = pageOrigin + u;
+          result.links[key] = u;
+        }
+      });
+    }
+
+    const tracksBlock = unpacked.match(/tracks\s*:\s*\[([^\]]+)\]/);
+    if (tracksBlock) {
+      const re = /\{\s*file\s*:\s*"([^"]+)"\s*,\s*label\s*:\s*"([^"]+)"\s*,\s*kind\s*:\s*"([^"]+)"(?:\s*,\s*"?default"?\s*:\s*(true))?/g;
+      let tm;
+      while ((tm = re.exec(tracksBlock[1])) !== null) {
+        if (tm[3] === 'captions') {
+          result.captions.push({
+            file: tm[1],
+            label: tm[2],
+            default: !!tm[4],
+          });
+        }
+      }
+    }
+
+    const img = unpacked.match(/image\s*:\s*"([^"]+)"/);
+    if (img) result.image = img[1];
+    const dur = unpacked.match(/duration\s*:\s*"?([\d.]+)"?/);
+    if (dur) result.duration = parseFloat(dur[1]);
+  }
+
+  // Fallback regex
+  if (!result.links.hls2 && !result.links.hls4) {
+    const gen = html.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+    if (gen) result.links.regex = gen[1];
+    const rel = html.match(/["'](\/stream\/[^"']+\.m3u8)["']/i);
+    if (rel) result.links.hls4 = pageOrigin + rel[1];
+  }
+  if (!result.captions.length) {
+    const vtts = [...html.matchAll(/(https?:\/\/[^"'\s]+\.vtt)/gi)];
+    vtts.forEach(function (m, i) {
+      result.captions.push({ file: m[1], label: 'Sub ' + (i + 1), default: i === 0 });
+    });
+  }
+
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RESOLUCIÓN HLSWish — Fetch DIRECTO al embed (sin proxy)
+// ═══════════════════════════════════════════════════════════════
+
+async function resolveHLSWish(embedUrl) {
+  showLoading('Resolviendo HLSWish...');
+  updateLoadingSubtext('Desempaquetando código...');
+
+  try {
+    // IMPORTANTE: HLSWish bloquea el proxy del Worker en el embed.
+    // Hacemos fetch DIRECTO al embed (CORS debe estar habilitado en el dominio o usar extensión)
+    console.log('[HLSWish] Fetch directo:', embedUrl);
+
+    const res = await fetch(embedUrl, { method: 'GET', mode: 'cors' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+
+    const html = await res.text();
+    console.log('[HLSWish] HTML recibido:', html.length, 'chars');
+
+    const origin = new URL(embedUrl).origin;
+    const media = extractHLSWishMedia(html, origin);
+
+    const order = ['hls4', 'hls2', 'hls3', 'regex'];
+    let m3u8Url = null;
+    for (let i = 0; i < order.length; i++) {
+      if (media.links[order[i]]) {
+        m3u8Url = media.links[order[i]];
+        console.log('[HLSWish] Usando ' + order[i] + ':', m3u8Url.substring(0, 90) + '...');
+        break;
+      }
+    }
+
+    if (!m3u8Url) {
+      console.error('[HLSWish] HTML preview:', html.substring(0, 800));
+      throw new Error('No se encontró master .m3u8 en el embed de HLSWish');
+    }
+
+    if (m3u8Url.startsWith('//')) m3u8Url = 'https:' + m3u8Url;
+    else if (m3u8Url.startsWith('/')) m3u8Url = origin + m3u8Url;
+
+    // Proxyar M3U8 y subtítulos por el Worker (el embed ya se resolvió directo)
+    const proxiedTracks = (media.captions || []).map(t => {
+      let file = t.file;
+      if (file.startsWith('//')) file = 'https:' + file;
+      else if (file.startsWith('/')) file = origin + file;
+      return {
+        ...t,
+        file: GOODSTREAM_WORKER + encodeURIComponent(file)
+      };
+    });
+
+    console.log('[HLSWish] M3U8:', m3u8Url.substring(0, 80) + '...');
+    console.log('[HLSWish] Tracks:', proxiedTracks.length);
+
+    return {
+      title: VIDEO_TITLE,
+      type: 'hls',
+      url: m3u8Url,
+      rawUrl: m3u8Url,
+      proxyUrl: GOODSTREAM_WORKER + encodeURIComponent(m3u8Url),
+      tracks: proxiedTracks,
+      serverName: 'hlswish',
+      referer: embedUrl,
+      origin: origin,
+      useWorkerProxy: true,
+      workerUrl: GOODSTREAM_WORKER,
+      poster: media.image
+    };
+
+  } catch (err) {
+    console.error('[HLSWish] Error:', err);
+    throw err;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // RESOLUCIÓN VIMEOS — via API Playwright (Render)
-// Devuelve URL directa del M3U8, NO proxy
 // ═══════════════════════════════════════════════════════════════
 
 async function resolveVimeos(embedUrl) {
@@ -94,13 +266,9 @@ async function resolveVimeos(embedUrl) {
       throw new Error('La API no devolvió URL del stream');
     }
 
-    // IMPORTANTE: NO usamos proxy de sesión.
-    // Usamos la URL directa del M3U8. Para evitar CORS/403 en el navegador,
-    // usamos el Worker de GoodStream como proxy (también funciona para Vimeos)
     const directUrl = data.url;
     const proxiedUrl = GOODSTREAM_WORKER + encodeURIComponent(directUrl);
 
-    // Los tracks de subtítulos también los proxyamos por el Worker
     const proxiedTracks = (data.tracks || []).map(t => ({
       ...t,
       file: GOODSTREAM_WORKER + encodeURIComponent(t.file)
@@ -109,15 +277,15 @@ async function resolveVimeos(embedUrl) {
     return {
       title: VIDEO_TITLE,
       type: 'hls',
-      url: directUrl,              // URL directa original
-      rawUrl: directUrl,           // URL directa
-      proxyUrl: proxiedUrl,        // URL proxyada por Worker para reproducir
-      tracks: proxiedTracks,       // Tracks proxyados
+      url: directUrl,
+      rawUrl: directUrl,
+      proxyUrl: proxiedUrl,
+      tracks: proxiedTracks,
       audioTracks: data.audioTracks || [],
       serverName: 'vimeos',
       referer: data.referer,
       origin: null,
-      useWorkerProxy: true,        // Usamos el Worker de GoodStream como proxy
+      useWorkerProxy: true,
       workerUrl: GOODSTREAM_WORKER
     };
 
@@ -233,6 +401,7 @@ async function resolveEmbedInBrowser(embedUrl) {
 
   if (server === 'goodstream') return await resolveGoodStream(embedUrl);
   if (server === 'vimeos') return await resolveVimeos(embedUrl);
+  if (server === 'hlswish') return await resolveHLSWish(embedUrl);
 
   throw new Error('Servidor no implementado: ' + server);
 }
@@ -241,7 +410,7 @@ async function resolveEmbedInBrowser(embedUrl) {
 // LOADERS PERSONALIZADOS
 // ═══════════════════════════════════════════════════════════════
 
-// Loader para GoodStream y Vimeos: proxya TODO por el Worker
+// Loader para GoodStream, Vimeos y HLSWish: proxya TODO por el Worker
 function createWorkerLoader(workerUrl) {
   return class extends Hls.DefaultConfig.loader {
     load(context, config, callbacks) {
@@ -268,13 +437,17 @@ function loadSource(source) {
 
   if (source.type !== 'hls') return;
 
+  // Poster para HLSWish
+  if (source.poster) {
+    video.poster = source.poster;
+  }
+
   if (window.Hls && Hls.isSupported()) {
 
     let CustomLoader = undefined;
     let loadUrl = source.proxyUrl || source.url;
 
     if (source.useWorkerProxy) {
-      // Tanto Vimeos como GoodStream usan el mismo Worker como proxy
       CustomLoader = createWorkerLoader(GOODSTREAM_WORKER);
       console.log('[Proxy] Proxyando via Worker Cloudflare');
     }
@@ -378,7 +551,7 @@ function loadSource(source) {
   }
 
   updateServerBadge(source.serverName ? source.serverName.toUpperCase() : 'AUTO');
-  setupSubtitles(source.tracks || [], { useApiProxy: false }); // No usamos API proxy, usamos Worker
+  setupSubtitles(source.tracks || [], { useApiProxy: false });
 }
 
 // ─── INICIALIZAR ─────────────────────────────────────────────
