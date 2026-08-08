@@ -382,14 +382,18 @@ function setupAudioTracks(hlsInstance) {
     opt.className = 'menu-option focusable' + (isActive ? ' active' : '');
     opt.dataset.trackId = t.id;
     opt.dataset.source = t.source;
+    if (t.source === 'hls') opt.dataset.hlsId = String(t.hlsId);
+    if (t.source === 'embed') opt.dataset.embedIdx = String(t.embedIdx);
     opt.innerHTML = `<span>${t.name}${t.source === 'embed' ? ' (Ext)' : ''}</span><span class="check">✓</span>`;
 
     opt.addEventListener('click', () => {
       if (t.source === 'hls') {
         hlsInstance.audioTrack = t.hlsId;
         currentEmbedAudioTrack = null;
+        highlightActiveAudioTrack(t.hlsId);
       } else {
         switchEmbedAudioTrack(t.embedIdx, t.file);
+        highlightActiveAudioTrack();
       }
       showToast('Audio: ' + t.name);
       closeAudioMenu();
@@ -410,13 +414,21 @@ function switchEmbedAudioTrack(idx, fileUrl) {
 }
 
 function highlightActiveAudioTrack(activeId) {
+  const hlsInst = (typeof hls !== 'undefined' && hls) ? hls : null;
+  const currentHlsId = (activeId !== undefined && activeId !== null)
+    ? activeId
+    : (hlsInst ? hlsInst.audioTrack : null);
+
   Array.from(audioOptions.children).forEach(el => {
     const source = el.dataset.source;
+    let isActive = false;
     if (source === 'hls') {
-      el.classList.toggle('active', false);
+      const trackHlsId = Number(el.dataset.hlsId);
+      isActive = currentHlsId !== null && currentHlsId !== undefined && trackHlsId === Number(currentHlsId);
     } else {
-      el.classList.toggle('active', Number(el.dataset.embedIdx) === currentEmbedAudioTrack);
+      isActive = Number(el.dataset.embedIdx) === currentEmbedAudioTrack;
     }
+    el.classList.toggle('active', isActive);
   });
 }
 
@@ -469,10 +481,17 @@ function togglePlay() {
 }
 
 function updatePlayIcon() {
-  const icon = video.paused ? '▶' : '⏸';
-  btnPlayPause.textContent = icon;
-  playPauseIcon2.textContent = icon;
-  btnPlayPause2.lastElementChild.textContent = video.paused ? 'Reproducir' : 'Pausar';
+  const paused = video.paused;
+  // Centro: alternar iconos SVG sin destruir el markup
+  if (btnPlayPause) {
+    btnPlayPause.classList.toggle('is-paused', paused);
+    btnPlayPause.classList.toggle('is-playing', !paused);
+    btnPlayPause.setAttribute('title', paused ? 'Reproducir' : 'Pausar');
+  }
+  if (playPauseIcon2) playPauseIcon2.textContent = paused ? '▶' : '⏸';
+  if (btnPlayPause2 && btnPlayPause2.lastElementChild) {
+    btnPlayPause2.lastElementChild.textContent = paused ? 'Reproducir' : 'Pausar';
+  }
 }
 
 function seekBy(seconds) {
@@ -524,12 +543,31 @@ function toggleFullscreen() {
 // ═══════════════════════════════════════════════════════════════
 function showControls() {
   controlsOverlay.classList.remove('hidden');
+  document.getElementById('player-container')?.classList.remove('controls-hidden');
   clearTimeout(controlsHideTimer);
   controlsHideTimer = setTimeout(() => {
     if (!video.paused && !subtitleMenuOpen && !audioMenuOpen && !videoSettingsOpen) {
       controlsOverlay.classList.add('hidden');
+      document.getElementById('player-container')?.classList.add('controls-hidden');
     }
   }, 4000);
+}
+
+function bindControlsActivity() {
+  const root = document.getElementById('player-container');
+  if (!root || root.dataset.activityBound) return;
+  root.dataset.activityBound = '1';
+  const wake = () => showControls();
+  ['mousemove', 'mousedown', 'touchstart', 'touchmove', 'pointerdown', 'keydown'].forEach((ev) => {
+    root.addEventListener(ev, wake, { passive: true });
+  });
+  // Al pausar, dejar controles visibles
+  video.addEventListener('pause', () => {
+    clearTimeout(controlsHideTimer);
+    controlsOverlay.classList.remove('hidden');
+    root.classList.remove('controls-hidden');
+  });
+  video.addEventListener('play', () => showControls());
 }
 
 // ═══════════════════════════════════════════════════════════════
