@@ -2,8 +2,15 @@ node_modules/
 
 .env
 .env.local
-
-
+page-cloudflare
+webos-app
+player-GoodStream.html
+player-hlswish.html
+player-universal-webos.html
+player-webos-goodstream.html
+player-webos-streamtape.html
+server+index-08-08-2026.zip
+.wrangler
 
 diagnose-goodstream.js
 diagnose-jessicachoosemake.js

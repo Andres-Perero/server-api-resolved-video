@@ -421,6 +421,87 @@ app.get("/api/proxy", async (req, res) => {
     res.status(502).json({ error: 'Proxy failed', message: err.message });
   }
 });
+// ═══════════════════════════════════════════════════════════════
+// ENDPOINT: Resolver Streamtape (sin Playwright)
+// GET /api/streamtape?url=https://streamtape.com/e/xxxxx
+// ═══════════════════════════════════════════════════════════════
+app.get("/api/streamtape", async (req, res) => {
+  const url = req.query.url;
+
+  if (!url || !url.includes("streamtape.com")) {
+    return res.status(400).json({ 
+      success: false, 
+      error: "URL de Streamtape inválida" 
+    });
+  }
+
+  try {
+    // Preferimos la versión /v/
+    let targetUrl = url.replace("/e/", "/v/");
+
+    const response = await fetch(targetUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Referer": "https://streamtape.com/",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const html = await response.text();
+
+    // Método 1: src del video
+    let match = html.match(/id="mainvideo"[^>]*src="([^"]+)"/i);
+
+    // Método 2: scripts ofuscados
+    if (!match) {
+      match = html.match(/document\.getElementById\(['"](?:botlink|robotlink|norobotlink|ideoolink)['"]\)\.innerHTML\s*=\s*['"]([^'"]+)['"]/i);
+    }
+
+    // Método 3: cualquier get_video
+    if (!match) {
+      match = html.match(/(https?:)?\/\/streamtape\.com\/get_video\?[^"'>\s]+/i);
+    }
+
+    if (!match || !match[1]) {
+      return res.status(404).json({
+        success: false,
+        error: "No se pudo extraer el link del video"
+      });
+    }
+
+    let finalUrl = match[1];
+
+    // Limpieza
+    finalUrl = finalUrl.replace(/&amp;/g, "&");
+    if (finalUrl.startsWith("//")) finalUrl = "https:" + finalUrl;
+    if (!finalUrl.startsWith("http")) finalUrl = "https://" + finalUrl;
+
+    // Forzar stream=1
+    if (!finalUrl.includes("stream=1")) {
+      finalUrl += (finalUrl.includes("?") ? "&" : "?") + "stream=1";
+    }
+
+    return res.json({
+      success: true,
+      type: "mp4",
+      url: finalUrl,
+      serverName: "streamtape",
+      resolvedAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error("[STREAMTAPE ERROR]", error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
