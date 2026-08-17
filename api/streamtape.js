@@ -1,121 +1,75 @@
-// /api/streamtape.js
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+  const { url } = req.query;
 
-  const url = req.query.url;
-
-  if (!url || !url.includes("streamtape.com")) {
-    return res.status(400).json({
-      success: false,
-      error: "URL de Streamtape inválida"
-    });
+  if (!url || !url.includes('streamtape.com')) {
+    return res.status(400).json({ success: false, error: 'URL de Streamtape inválida' });
   }
 
   try {
-    // Probamos tanto /e/ como /v/
-    const urlsToTry = [
-      url.replace("/e/", "/v/"),
-      url,
-      url.replace("/v/", "/e/")
-    ];
+    // Usamos la URL tal como viene (o aseguramos que use el reproductor /e/)
+    const targetUrl = url.includes('/e/') ? url : url.replace('/v/', '/e/');
 
-    let html = null;
-    let lastError = null;
+    const response = await fetch(targetUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://streamtape.com/',
+        'Cookie': 'streamtape_session=1;' // Simula sesión activa
+      },
+    });
 
-    for (const targetUrl of urlsToTry) {
-      try {
-        const response = await fetch(targetUrl, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-            "Referer": "https://streamtape.com/",
-            "Origin": "https://streamtape.com"
-          },
-          redirect: "follow"
-        });
-
-        if (response.ok) {
-          html = await response.text();
-          break;
-        }
-      } catch (err) {
-        lastError = err.message;
-      }
-    }
-
-    if (!html) {
-      throw new Error(lastError || "No se pudo obtener el HTML");
-    }
-
-    // Varios métodos de extracción (ordenados por fiabilidad)
-    const patterns = [
-      // 1. src directo del video
-      /id=["']mainvideo["'][^>]*src=["']([^"']+)["']/i,
-      
-      // 2. botlink / robotlink / norobotlink / ideoolink
-      /getElementById\(['"](?:botlink|robotlink|norobotlink|ideoolink)['"]\)\.innerHTML\s*=\s*['"]([^'"]+)['"]/i,
-      
-      // 3. Cualquier get_video
-      /(https?:)?\/\/streamtape\.com\/get_video\?[^"'\\s<>]+/i,
-      
-      // 4. token + expires (último recurso)
-      /get_video\?id=([^&"']+)&expires=([^&"']+)&ip=([^&"']+)&token=([^&"']+)/i
-    ];
-
-    let finalUrl = null;
-
-    for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match) {
-        if (match[1] && match[1].includes("get_video")) {
-          finalUrl = match[1];
-          break;
-        }
-        // Caso del patrón 4 (reconstruir)
-        if (match[1] && match[2] && match[3] && match[4]) {
-          finalUrl = `//streamtape.com/get_video?id=${match[1]}&expires=${match[2]}&ip=${match[3]}&token=${match[4]}`;
-          break;
-        }
-        if (match[1]) {
-          finalUrl = match[1];
-          break;
-        }
-      }
-    }
-
-    if (!finalUrl) {
-      return res.status(404).json({
-        success: false,
-        error: "No se pudo extraer el link del video"
+    if (response.status === 404) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'El video no existe o fue eliminado de Streamtape.' 
       });
     }
 
-    // Limpieza final
-    finalUrl = finalUrl.replace(/&amp;/g, "&").replace(/\\/g, "");
-    if (finalUrl.startsWith("//")) finalUrl = "https:" + finalUrl;
-    if (!finalUrl.startsWith("http")) finalUrl = "https://" + finalUrl;
-
-    if (!finalUrl.includes("stream=1")) {
-      finalUrl += (finalUrl.includes("?") ? "&" : "?") + "stream=1";
+    if (!response.ok) {
+      throw new Error(`Streamtape respondió con HTTP ${response.status}`);
     }
+
+    const html = await response.text();
+
+    // 1. Extraer la ofuscación típica de Streamtape: robotlink + substring
+    const robotMatch = html.match(/robotlink['"]\)\.innerHTML\s*=\s*['"]([^'"]+)['"]\s*\+\s*\(['"]([^'"]+)['"]\)/i);
+
+    let finalUrl = '';
+
+    if (robotMatch) {
+      const basePart = robotMatch[1];
+      const subStringPart = robotMatch[2];
+      
+      // Recrea el trozo cortado por el .substring(1) o .substring(2) del script
+      finalUrl = 'https:' + basePart + subStringPart.substring(1);
+    } else {
+      // 2. Fallback: buscar directamente por token / get_video
+      const fallback = html.match(/(?:https?:)?\/\/streamtape\.com\/get_video\?[^"'>\s]+/i);
+      if (fallback) finalUrl = fallback[0];
+    }
+
+    if (!finalUrl) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'No se pudo desofuscar la URL del video.' 
+      });
+    }
+
+    // Normalizar URL
+    finalUrl = finalUrl.replace(/&amp;/g, '&');
+    if (finalUrl.startsWith('//')) finalUrl = 'https:' + finalUrl;
+    if (!finalUrl.startsWith('http')) finalUrl = 'https://' + finalUrl;
 
     return res.status(200).json({
       success: true,
-      type: "mp4",
-      url: finalUrl,
-      serverName: "streamtape",
-      resolvedAt: new Date().toISOString()
+      url: finalUrl
     });
 
   } catch (error) {
-    console.error("[STREAMTAPE ERROR]", error.message);
     return res.status(500).json({
       success: false,
       error: error.message
