@@ -30,18 +30,29 @@ export default async function handler(req, res) {
 
     const html = await response.text();
 
-    // Extraer token y enlace ofuscado
-    const robotMatch = html.match(/robotlink['"]\)\.innerHTML\s*=\s*['"]([^'"]+)['"]\s*\+\s*\(['"]([^'"]+)['"]\)/i);
-
     let getVideoUrl = '';
 
-    if (robotMatch) {
-      const basePart = robotMatch[1];
-      const subStringPart = robotMatch[2];
-      getVideoUrl = 'https:' + basePart + subStringPart.substring(1);
+    // Captura: document.getElementById('botlink').innerHTML = '//streamtape.com/get_video?id=a' + ('xyzajVG...').substring(4);
+    const botlinkMatch = html.match(/getElementById\(['"]botlink['"]\)\.innerHTML\s*=\s*['"]([^'"]+)['"]\s*\+\s*\(['"]([^'"]+)['"]\)\.substring\((\d+)\)/i);
+
+    if (botlinkMatch) {
+      const basePart = botlinkMatch[1];      // '//streamtape.com/get_video?id=a'
+      const rawString = botlinkMatch[2];     // 'xyzajVG33x0JYhxvj2&expires=...'
+      const subLength = parseInt(botlinkMatch[3], 10); // 4
+
+      getVideoUrl = 'https:' + basePart + rawString.substring(subLength);
     } else {
-      const fallback = html.match(/(?:https?:)?\/\/streamtape\.com\/get_video\?[^"'>\s]+/i);
-      if (fallback) getVideoUrl = fallback[0];
+      // Fallback para robotlink en caso de variante con múltiples substrings
+      const robotMatch = html.match(/getElementById\(['"]robotlink['"]\)\.innerHTML\s*=\s*['"]([^'"]+)['"]\s*\+\s*\(['"]([^'"]+)['"]\)\.substring\((\d+)\)\.substring\((\d+)\)/i);
+      
+      if (robotMatch) {
+        const basePart = robotMatch[1];
+        const rawString = robotMatch[2];
+        const sub1 = parseInt(robotMatch[3], 10);
+        const sub2 = parseInt(robotMatch[4], 10);
+
+        getVideoUrl = 'https:' + basePart + rawString.substring(sub1).substring(sub2);
+      }
     }
 
     if (!getVideoUrl) {
@@ -49,25 +60,26 @@ export default async function handler(req, res) {
     }
 
     getVideoUrl = getVideoUrl.replace(/&amp;/g, '&');
-    if (getVideoUrl.startsWith('//')) getVideoUrl = 'https:' + getVideoUrl;
+    if (!getVideoUrl.includes('stream=1')) {
+      getVideoUrl += '&stream=1';
+    }
 
-    // SEGUNDO PASO: Hacer un fetch con redirect 'manual' para atrapar la URL del CDN (tapecontent.net)
+    // PASO FINAL: Obtener el enlace directo al CDN tapecontent.net
     const redirectResponse = await fetch(getVideoUrl, {
       method: 'GET',
-      redirect: 'manual', // Evita descargar el MP4 completo, solo atrapa el Location
+      redirect: 'manual',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Referer': 'https://streamtape.com/'
       }
     });
 
-    // Extraer el Location del CDN de las cabeceras
     const finalCdnUrl = redirectResponse.headers.get('location') || redirectResponse.url;
 
     return res.status(200).json({
       success: true,
       get_video: getVideoUrl,
-      url: finalCdnUrl // <-- Aquí obtendrás la URL directa a tapecontent.net
+      url: finalCdnUrl
     });
 
   } catch (error) {
