@@ -1,0 +1,731 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Morencius Player v5 — JWPlayer + hls3</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh;
+      background: radial-gradient(circle at top, rgba(255,77,79,.16), transparent 35%), #070b10;
+      color: #e6edf3;
+      font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      padding: 16px;
+    }
+    .shell { max-width: 1100px; margin: 0 auto; }
+    h1 { margin: 0 0 4px; font-size: 1.3rem; }
+    .sub { color: #9fb2c8; margin-bottom: 12px; font-size: .9rem; }
+    .player-box {
+      position: relative; aspect-ratio: 16 / 9;
+      background: #000; border: 1px solid rgba(255,255,255,.09);
+      border-radius: 14px; overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0,0,0,.5);
+    }
+    video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+    .overlay {
+      position: absolute; inset: 0;
+      display: grid; place-content: center; justify-items: center; gap: 12px;
+      text-align: center; padding: 20px;
+      background: rgba(0,0,0,.75); backdrop-filter: blur(4px);
+      transition: opacity .2s;
+    }
+    .overlay.hidden { opacity: 0; pointer-events: none; }
+    .spinner {
+      width: 48px; height: 48px; border-radius: 50%;
+      border: 4px solid rgba(255,255,255,.22); border-top-color: #ff4d4f;
+      animation: spin .9s linear infinite;
+    }
+    .spinner[hidden], .retry[hidden] { display: none !important; }
+    .status { font-weight: 700; max-width: 60ch; }
+    .retry {
+      border: 0; cursor: pointer; background: #ff4d4f; color: #fff;
+      font-weight: 800; padding: 10px 16px; border-radius: 12px;
+    }
+    .panel {
+      margin-top: 12px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      padding: 14px; border-radius: 14px;
+    }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+    label { font-weight: 700; display: block; margin-bottom: 4px; font-size: .85rem; }
+    input, select, textarea {
+      width: 100%; padding: 9px 11px; border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.12);
+      background: #0c1219; color: #fff; outline: none; font-family: inherit;
+    }
+    textarea { min-height: 220px; font-family: 'Courier New', monospace; font-size: 12px; resize: vertical; }
+    .button {
+      border: 0; cursor: pointer; background: #ff4d4f; color: #fff;
+      font-weight: 800; padding: 9px 16px; border-radius: 10px;
+    }
+    .button.secondary { background: rgba(255,255,255,.1); }
+    .stats {
+      margin-top: 10px;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 6px; font-size: .8rem;
+    }
+    .stat {
+      background: rgba(0,0,0,.3); border: 1px solid rgba(255,255,255,.08);
+      padding: 6px 9px; border-radius: 8px;
+    }
+    .stat .k { color: #9fb2c8; display: block; font-size: .7rem; }
+    .stat .v { color: #fff; font-weight: 700; word-break: break-all; }
+    .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+    .tag {
+      background: rgba(255,77,79,.15); border: 1px solid rgba(255,77,79,.3);
+      color: #ff7a7c; padding: 2px 8px; border-radius: 6px;
+      font-size: .75rem; font-weight: 600;
+    }
+    .tag.green { background: rgba(82,196,26,.15); border-color: rgba(82,196,26,.3); color: #73d13d; }
+    .tag.blue  { background: rgba(24,144,255,.15); border-color: rgba(24,144,255,.3); color: #40a9ff; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width: 640px) { body { padding: 10px; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <h1>🎬 Morencius Player v5</h1>
+    <div class="sub">JWPlayer /stream + packer · proxy rewrite (sin custom loader)</div>
+
+    <div class="player-box">
+      <video id="video" controls playsinline></video>
+      <div id="overlay" class="overlay">
+        <div id="spinner" class="spinner"></div>
+        <div id="status" class="status">Esperando...</div>
+        <button id="retryBtn" class="retry" hidden>Reintentar</button>
+      </div>
+    </div>
+
+    <section class="panel">
+      <div class="row">
+        <div>
+          <label>URL del embed</label>
+          <input id="embedInput" type="url"
+                 placeholder="https://morencius.com/embed/x5hvx75vzo3w"
+                 value="https://morencius.com/embed/x5hvx75vzo3w">
+        </div>
+        <button id="loadBtn" class="button" style="height: 38px;">▶ Cargar</button>
+      </div>
+
+      <div id="tags" class="tags"></div>
+
+      <div class="stats" id="stats" style="display:none;">
+        <div class="stat"><span class="k">Resolución</span><span class="v" id="st-res">—</span></div>
+        <div class="stat"><span class="k">Bitrate</span><span class="v" id="st-br">—</span></div>
+        <div class="stat"><span class="k">Codecs</span><span class="v" id="st-co">—</span></div>
+        <div class="stat"><span class="k">FPS</span><span class="v" id="st-fps">—</span></div>
+        <div class="stat"><span class="k">Duración</span><span class="v" id="st-dur">—</span></div>
+        <div class="stat"><span class="k">Calidades</span><span class="v" id="st-lvl">—</span></div>
+      </div>
+
+      <div style="margin-top:10px; display:grid; grid-template-columns: 1fr 1fr; gap:8px;">
+        <div>
+          <label>Calidad</label>
+          <select id="quality"><option value="-1">Automática</option></select>
+        </div>
+        <div>
+          <label>Audio</label>
+          <select id="audio"><option value="-1">—</option></select>
+        </div>
+      </div>
+
+      <div style="margin-top:10px;">
+        <label>Logs</label>
+        <textarea id="logs" readonly></textarea>
+        <div style="margin-top:6px; display:flex; gap:6px;">
+          <button id="clearLogs" class="button secondary">Limpiar logs</button>
+          <button id="testWorker" class="button secondary">🔎 Test Worker</button>
+          <button id="testHls3" class="button secondary">🧪 Test master</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const WORKER_BASE = 'https://goodstream-proxy-render.ff15.workers.dev';
+    const proxify = (url) => `${WORKER_BASE}/?url=${encodeURIComponent(url)}`;
+
+    const $ = (id) => document.getElementById(id);
+    const video      = $('video');
+    const overlay    = $('overlay');
+    const statusEl   = $('status');
+    const spinner    = $('spinner');
+    const retryBtn   = $('retryBtn');
+    const embedInput = $('embedInput');
+    const loadBtn    = $('loadBtn');
+    const tagsEl     = $('tags');
+    const statsEl    = $('stats');
+    const qualitySel = $('quality');
+    const audioSel   = $('audio');
+    const logsEl     = $('logs');
+    const clearLogs  = $('clearLogs');
+    const testWorker = $('testWorker');
+    const testHls3   = $('testHls3');
+
+    let hls = null;
+    let currentEmbed = '';
+
+    function log(msg, type = 'info') {
+      const t = new Date().toTimeString().slice(0, 8);
+      const prefix = type === 'error' ? '❌' : type === 'warn' ? '⚠️' : type === 'ok' ? '✅' : '→';
+      const line = `[${t}] ${prefix} ${msg}\n`;
+      logsEl.value += line;
+      logsEl.scrollTop = logsEl.scrollHeight;
+      console.log(`[${t}]`, msg);
+    }
+
+    function setOverlay(text, opts = {}) {
+      if (opts.hide) { overlay.classList.add('hidden'); return; }
+      overlay.classList.remove('hidden');
+      statusEl.textContent = text;
+      spinner.hidden = !opts.loading;
+      retryBtn.hidden = !opts.retry;
+    }
+
+    function addTag(text, color = '') {
+      const span = document.createElement('span');
+      span.className = 'tag ' + color;
+      span.textContent = text;
+      tagsEl.appendChild(span);
+    }
+    function clearTags() { tagsEl.innerHTML = ''; }
+
+    testWorker.addEventListener('click', async () => {
+      log('═══ TEST DEL WORKER ═══');
+      const testUrl = 'https://morencius.com/embed/x5hvx75vzo3w';
+      const proxied = proxify(testUrl);
+      const start = performance.now();
+      try {
+        const res = await fetch(proxied);
+        const elapsed = Math.round(performance.now() - start);
+        log(`Respuesta en ${elapsed}ms — status: ${res.status}`, res.ok ? 'ok' : 'error');
+        log(`Content-Type: ${res.headers.get('content-type')}`);
+        log(`CORS-Allow-Origin: ${res.headers.get('access-control-allow-origin')}`);
+      } catch (e) {
+        log(`Error de red: ${e.message}`, 'error');
+      }
+    });
+
+    testHls3.addEventListener('click', async () => {
+      log('═══ TEST DIRECTO MASTER ═══');
+      const embedUrl = embedInput.value.trim();
+      if (!embedUrl) { log('Pon una URL de embed primero', 'warn'); return; }
+
+      const { urls } = await resolveEmbed(embedUrl);
+      if (!urls.length) { log('No se encontró ninguna URL', 'error'); return; }
+
+      const target = urls[0];
+      log(`Usando [${target.key}]: ${target.url}`);
+      const proxied = proxify(target.url);
+      log(`Proxificada: ${proxied.slice(0, 120)}...`);
+
+      const start = performance.now();
+      try {
+        const res = await fetch(proxied);
+        const elapsed = Math.round(performance.now() - start);
+        const text = await res.text();
+        log(`Status: ${res.status} (${elapsed}ms)`, res.ok ? 'ok' : 'error');
+        log(`Content-Type: ${res.headers.get('content-type')}`);
+        log(`CORS: ${res.headers.get('access-control-allow-origin')}`);
+        log(`Tamaño: ${text.length} chars`);
+        log(`Preview (300 chars):\n${text.slice(0, 300)}`, 'ok');
+
+        if (text.includes('#EXTM3U')) {
+          log('✅ Es un M3U8 válido', 'ok');
+          const lines = text.split('\n').filter(l => l.trim());
+          log(`Líneas: ${lines.length}`);
+          lines.slice(0, 12).forEach((l, i) => log(`  [${i}] ${l.slice(0, 120)}`));
+        } else {
+          log('⚠️ NO es un M3U8 válido — el worker puede estar devolviendo HTML', 'error');
+        }
+      } catch (e) {
+        log(`Error: ${e.message}`, 'error');
+      }
+    });
+
+    function detectPacked(html) {
+      const re = /eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*[dr]\s*\)\s*\{[\s\S]*?\}\s*\(\s*'([\s\S]*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'([\s\S]*?)'\s*\.\s*split\s*\(\s*'\|'\s*\)/;
+      return html.match(re);
+    }
+
+    function unpackDeanEdwards(p, a, c, k, e, d) {
+      while (c--) {
+        if (k[c]) {
+          const pattern = new RegExp('\\b' + c.toString(a) + '\\b', 'g');
+          p = p.replace(pattern, k[c]);
+        }
+      }
+      return p;
+    }
+
+    function unpackFromHtml(html) {
+      const m = detectPacked(html);
+      if (!m) return null;
+      const [, payload, radix, count, wordsStr] = m;
+      try {
+        return unpackDeanEdwards(payload, parseInt(radix, 10), parseInt(count, 10), wordsStr.split('|'), 0, {});
+      } catch (err) {
+        log('Error desempacando: ' + err.message, 'error');
+        return null;
+      }
+    }
+
+    function parseLinksObject(code) {
+      const re = /var\s+links\s*=\s*\{([\s\S]*?)\}\s*;/;
+      const m = code.match(re);
+      if (!m) return null;
+      const inner = m[1];
+      const result = {};
+      const kvRegex = /["']?(\w+)["']?\s*:\s*["']([^"']+)["']/g;
+      let match;
+      while ((match = kvRegex.exec(inner)) !== null) {
+        result[match[1]] = match[2];
+      }
+      return Object.keys(result).length > 0 ? result : null;
+    }
+
+    function extractJwMaster(code, origin) {
+      const candidates = [];
+      const fileRe = /["']file["']\s*:\s*["']([^"']+\.m3u8[^"']*)["']/gi;
+      let m;
+      while ((m = fileRe.exec(code)) !== null) candidates.push(m[1]);
+
+      const sourcesRe = /sources\s*:\s*\[[\s\S]*?["']file["']\s*:\s*["']([^"']+\.m3u8[^"']*)["']/i;
+      const sm = code.match(sourcesRe);
+      if (sm) candidates.push(sm[1]);
+
+      const streamRe = /(\/stream\/[A-Za-z0-9_\-\/]+\/master\.m3u8)/gi;
+      while ((m = streamRe.exec(code)) !== null) candidates.push(m[1]);
+
+      const absRe = /(https?:\/\/[^"'\s]+\/stream\/[^"'\s]+master\.m3u8[^"'\s]*)/gi;
+      while ((m = absRe.exec(code)) !== null) candidates.push(m[1]);
+
+      const seen = new Set();
+      const urls = [];
+      for (let u of candidates) {
+        u = u.trim();
+        if (u.startsWith('//')) u = 'https:' + u;
+        else if (u.startsWith('/')) u = origin + u;
+        if (!u.includes('.m3u8')) continue;
+        if (seen.has(u)) continue;
+        seen.add(u);
+        urls.push(u);
+      }
+      return urls;
+    }
+
+    async function resolveEmbed(embedUrl) {
+      log(`Proxy: ${WORKER_BASE}/?url=`);
+      log(`Embed: ${embedUrl}`);
+      clearTags();
+      statsEl.style.display = 'none';
+
+      const proxyUrl = proxify(embedUrl);
+      const t0 = performance.now();
+      const res = await fetch(proxyUrl);
+      const tFetch = Math.round(performance.now() - t0);
+      log(`proxy status: ${res.status} (${tFetch}ms)`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const html = await res.text();
+      log(`HTML recibido: ${html.length} chars`);
+      const unpacked = unpackFromHtml(html);
+      const codeToSearch = unpacked || html;
+      if (unpacked) log('Packer desempacado', 'ok');
+      else log('Sin packer — buscando JWPlayer / stream directo');
+
+      const origin = new URL(embedUrl).origin;
+      const urls = [];
+
+      const linksObj = parseLinksObject(codeToSearch);
+      if (linksObj) {
+        log(`Keys (links): ${Object.keys(linksObj).join(', ')}`);
+        const priority = ['hls4', 'hls3', 'hls2'];
+        for (const key of priority) {
+          if (linksObj[key]) {
+            let url = linksObj[key];
+            if (url.startsWith('/')) url = origin + url;
+            else if (!url.startsWith('http')) url = origin + '/' + url;
+            urls.push({ key, url, priority: priority.indexOf(key) });
+            log(`  ${key}: ${url.slice(0, 100)}...`, 'ok');
+          }
+        }
+        for (const [key, url] of Object.entries(linksObj)) {
+          if (!priority.includes(key) && (url.includes('.m3u8') || url.includes('master.txt'))) {
+            let finalUrl = url;
+            if (finalUrl.startsWith('/')) finalUrl = origin + finalUrl;
+            urls.push({ key, url: finalUrl, priority: 99 });
+          }
+        }
+      }
+
+      if (urls.length === 0) {
+        const jwUrls = extractJwMaster(codeToSearch, origin);
+        if (jwUrls.length) {
+          log(`JWPlayer / stream detectado: ${jwUrls.length} candidato(s)`, 'ok');
+          jwUrls.forEach((u, i) => {
+            urls.push({ key: i === 0 ? 'jw-master' : `jw-${i}`, url: u, priority: i });
+            log(`  [${i}] ${u.slice(0, 120)}...`, 'ok');
+          });
+        }
+      }
+
+      if (urls.length === 0) {
+        const generic = codeToSearch.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i)
+                     || codeToSearch.match(/["'](\/[^"']+\.m3u8)["']/i);
+        if (generic) {
+          let u = generic[1];
+          if (u.startsWith('/')) u = origin + u;
+          urls.push({ key: 'regex', url: u, priority: 50 });
+          log(`Fallback regex: ${u.slice(0, 100)}...`, 'ok');
+        }
+      }
+
+      urls.sort((a, b) => a.priority - b.priority);
+
+      const posterMatch = codeToSearch.match(/image\s*:\s*["'](https?:\/\/[^"']+)["']/i)
+                       || codeToSearch.match(/["']image["']\s*:\s*["'](https?:\/\/[^"']+)["']/i);
+      const poster = posterMatch ? posterMatch[1] : null;
+      const durationMatch = codeToSearch.match(/duration\s*:\s*["']?(\d+\.?\d*)["']?/i);
+      const duration = durationMatch ? parseFloat(durationMatch[1]) : null;
+
+      if (urls.length === 0) {
+        log('HTML preview (800 chars):\n' + html.slice(0, 800), 'error');
+        throw new Error('No se encontró .m3u8');
+      }
+      log(`${urls.length} URL(s) (orden: ${urls.map(u => u.key).join(' → ')})`, 'ok');
+      if (poster) log(`Poster: ${poster}`, 'ok');
+      if (duration) log(`Duración: ${Math.round(duration / 60)} min`, 'ok');
+
+      return { urls, poster, duration };
+    }
+
+    // LOADER CORREGIDO — stats.loading obligatorio para HLS.js
+    class WorkerLoader {
+      constructor(config) {
+        this.config = config;
+        this.xhr = null;
+        this.stats = null;
+        this.context = null;
+        this.callbacks = null;
+      }
+
+      destroy() {
+        this.abort();
+        this.xhr = null;
+        this.stats = null;
+        this.context = null;
+        this.callbacks = null;
+      }
+
+      abort() {
+        if (this.xhr) {
+          this.xhr.onreadystatechange = null;
+          this.xhr.onprogress = null;
+          this.xhr.onload = null;
+          this.xhr.onerror = null;
+          this.xhr.ontimeout = null;
+          this.xhr.abort();
+          this.xhr = null;
+        }
+        if (this.stats) this.stats.aborted = true;
+      }
+
+      load(context, config, callbacks) {
+        this.context = context;
+        this.callbacks = callbacks;
+        const stats = this.stats = {
+          aborted: false,
+          loaded: 0,
+          retry: 0,
+          total: 0,
+          chunkCount: 0,
+          bwEstimate: 0,
+          loading: { start: 0, first: 0, end: 0 },
+          parsing: { start: 0, end: 0 },
+          buffering: { start: 0, first: 0, end: 0 },
+        };
+
+        const startTime = performance.now();
+        stats.loading.start = startTime;
+
+        let requestUrl = context.url;
+        if (!requestUrl.includes(WORKER_BASE) && !requestUrl.includes('workers.dev')) {
+          requestUrl = proxify(context.url);
+        }
+
+        const xhr = this.xhr = new XMLHttpRequest();
+        xhr.open('GET', requestUrl, true);
+
+        const isPlaylist = /\.(m3u8|m3u|txt)(\?|$)/i.test(context.url) ||
+                           context.type === 'manifest' ||
+                           context.type === 'level';
+        if (context.responseType === 'arraybuffer' && !isPlaylist) {
+          xhr.responseType = 'arraybuffer';
+        } else if (context.responseType) {
+          xhr.responseType = context.responseType;
+        } else {
+          xhr.responseType = isPlaylist ? 'text' : 'arraybuffer';
+        }
+
+        xhr.timeout = (config && config.timeout) || 30000;
+
+        xhr.onprogress = (event) => {
+          if (event.lengthComputable) {
+            stats.loaded = event.loaded;
+            stats.total = event.total;
+          }
+          if (!stats.loading.first) stats.loading.first = performance.now();
+          if (callbacks.onProgress) {
+            callbacks.onProgress(stats, context, null, xhr);
+          }
+        };
+
+        xhr.onload = () => {
+          const now = performance.now();
+          if (!stats.loading.first) stats.loading.first = now;
+          stats.loading.end = now;
+
+          const status = xhr.status;
+          if (status >= 200 && status < 300) {
+            let data = xhr.response;
+            if (isPlaylist && typeof data !== 'string') {
+              if (data instanceof ArrayBuffer) {
+                data = new TextDecoder('utf-8').decode(data);
+              } else {
+                data = xhr.responseText || '';
+              }
+            }
+            const byteLength = typeof data === 'string'
+              ? data.length
+              : (data && data.byteLength) || 0;
+            stats.loaded = byteLength;
+            stats.total = byteLength;
+
+            log(`  ↳ ${context.url.slice(-70)} → ${status} (${Math.round(now - startTime)}ms, ${byteLength}b)`);
+
+            callbacks.onSuccess(
+              { url: context.url, data },
+              stats,
+              context,
+              xhr
+            );
+          } else {
+            log(`  ↳ ${context.url.slice(-70)} → HTTP ${status} (${Math.round(now - startTime)}ms)`, 'error');
+            callbacks.onError(
+              { code: status, text: xhr.statusText },
+              context,
+              xhr
+            );
+          }
+        };
+
+        xhr.onerror = () => {
+          stats.loading.end = performance.now();
+          log(`  ↳ Network error: ${context.url.slice(-70)}`, 'error');
+          callbacks.onError({ code: 0, text: 'Network Error' }, context, xhr);
+        };
+
+        xhr.ontimeout = () => {
+          stats.loading.end = performance.now();
+          log(`  ↳ Timeout: ${context.url.slice(-70)}`, 'error');
+          callbacks.onTimeout(stats, context, xhr);
+        };
+
+        xhr.send();
+      }
+    }
+
+    async function playStream(urls, poster) {
+      if (hls) { hls.destroy(); hls = null; }
+      video.removeAttribute('src');
+      if (poster) video.poster = poster;
+      video.load();
+
+      if (!window.Hls || !Hls.isSupported()) {
+        if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = proxify(urls[0].url);
+          video.play().catch(() => setOverlay('Pulsa ▶', { retry: true }));
+          return;
+        }
+        throw new Error('HLS no soportado');
+      }
+
+      for (let i = 0; i < urls.length; i++) {
+        const { key, url } = urls[i];
+        log(`▶ [${i + 1}/${urls.length}] ${key}`);
+        log(`  ${url.slice(0, 120)}...`);
+        setOverlay(`Conectando (${key})...`, { loading: true });
+
+        try {
+          const success = await tryStream(url, key);
+          if (success) { log(`✅ ${key} FUNCIONA`, 'ok'); return; }
+        } catch (err) {
+          log(`❌ ${key}: ${err.message}`, 'error');
+        }
+        if (i < urls.length - 1) {
+          log(`⏭ Siguiente...`, 'warn');
+          await new Promise(r => setTimeout(r, 800));
+        }
+      }
+      setOverlay('Todas fallaron. Revisa el worker.', { retry: true });
+    }
+
+    function tryStream(masterUrl, key) {
+      return new Promise((resolve, reject) => {
+        if (hls) {
+          try { hls.destroy(); } catch (_) {}
+          hls = null;
+        }
+
+        // El proxy reescribe TODAS las URIs del m3u8 → usamos loader nativo de HLS.js
+        // (el custom loader provocaba: Cannot read properties of null (reading 'chunkCount'))
+        const sourceUrl = proxify(masterUrl);
+        log(`  source (proxied): ${sourceUrl.slice(0, 100)}...`);
+
+        hls = new Hls({
+          enableWorker: true,
+          maxBufferLength: 30,
+          maxMaxBufferLength: 90,
+          maxBufferSize: 60 * 1000 * 1000,
+          manifestLoadingTimeOut: 25000,
+          manifestLoadingMaxRetry: 2,
+          levelLoadingTimeOut: 25000,
+          fragLoadingTimeOut: 45000,
+          startLevel: 0,
+        });
+
+        let settled = false;
+        const finish = (ok, err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          if (ok) resolve(true);
+          else reject(err || new Error('fail'));
+        };
+
+        const timeout = setTimeout(() => {
+          log(`  ⏰ Timeout 35s [${key}]`, 'error');
+          try { hls.destroy(); } catch (_) {}
+          finish(false, new Error('Timeout 35s'));
+        }, 35000);
+
+        hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
+          const levels = data.levels || [];
+          log(`🎞 ${levels.length} calidad(es) [${key}]`, 'ok');
+          qualitySel.innerHTML = '<option value="-1">Auto</option>';
+          levels.forEach((l, i) => {
+            const label = l.height ? `${l.height}p` : `${Math.round(l.bitrate / 1000)}k`;
+            qualitySel.add(new Option(`${label} (${Math.round(l.bitrate / 1000)}k)`, String(i)));
+          });
+          statsEl.style.display = 'grid';
+          $('st-lvl').textContent = levels.length;
+          if (levels[0]) {
+            $('st-res').textContent = `${levels[0].width || '?'}x${levels[0].height || '?'}`;
+            $('st-co').textContent = [levels[0].videoCodec, levels[0].audioCodec].filter(Boolean).join(', ');
+            $('st-br').textContent = Math.round(levels[0].bitrate / 1000) + ' kbps';
+            if (levels[0].frameRate) $('st-fps').textContent = levels[0].frameRate;
+          }
+          addTag(`🔗 ${key}`, '');
+          video.play().catch(() => {});
+        });
+
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          if (!settled) {
+            log(`✅ Primer fragmento en buffer [${key}]`, 'ok');
+            addTag('▶ HLS', 'green');
+            setOverlay('', { hide: true });
+            video.play().catch(() => setOverlay('Pulsa ▶', { retry: true }));
+            finish(true);
+          }
+        });
+
+        hls.on(Hls.Events.FRAG_LOADED, (_e, data) => {
+          const sn = data.frag ? data.frag.sn : '?';
+          const bytes = data.frag && data.frag.stats ? data.frag.stats.loaded : '?';
+          log(`  📦 frag sn=${sn} (${bytes}b)`, 'ok');
+        });
+
+        hls.on(Hls.Events.ERROR, (_e, data) => {
+          const extra = [];
+          if (data.details) extra.push(data.details);
+          if (data.type) extra.push(data.type);
+          if (data.response && data.response.code) extra.push('HTTP ' + data.response.code);
+          if (data.error && data.error.message) extra.push(data.error.message);
+          if (data.reason) extra.push(String(data.reason));
+          const msg = extra.join(' | ') || 'unknown';
+
+          if (!data.fatal) {
+            log(`  ⚠ no-fatal: ${msg}`, 'warn');
+            // reintentar media error una vez
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              try { hls.recoverMediaError(); } catch (_) {}
+            }
+            return;
+          }
+          log(`Error fatal [${key}]: ${msg}`, 'error');
+          try { hls.destroy(); } catch (_) {}
+          finish(false, new Error(data.details || msg));
+        });
+
+        hls.loadSource(sourceUrl);
+        hls.attachMedia(video);
+      });
+    }
+
+    async function start(embedUrl) {
+      if (hls) {
+        try { hls.destroy(); } catch (_) {}
+        hls = null;
+      }
+      currentEmbed = embedUrl;
+      clearTags();
+      setOverlay('Resolviendo...', { loading: true });
+      try {
+        const { urls, poster, duration } = await resolveEmbed(embedUrl);
+        if (duration) $('st-dur').textContent = `${Math.round(duration / 60)} min`;
+        await playStream(urls, poster);
+      } catch (err) {
+        log(`FATAL: ${err.message}`, 'error');
+        setOverlay('Error: ' + err.message, { retry: true });
+      }
+    }
+
+    video.addEventListener('play', () => {
+      setOverlay('', { hide: true });
+      addTag('▶ Play', 'green');
+    });
+    // Al seek: waiting muestra overlay; playing/seeked/canplay lo quitan
+    // (si solo escuchamos 'play', el overlay se queda pegado porque no vuelve a disparar play)
+    video.addEventListener('playing', () => setOverlay('', { hide: true }));
+    video.addEventListener('seeked', () => setOverlay('', { hide: true }));
+    video.addEventListener('canplay', () => {
+      if (!video.paused) setOverlay('', { hide: true });
+    });
+    video.addEventListener('waiting', () => {
+      // solo mostrar si realmente está esperando datos (no en el frame del seek)
+      if (video.readyState < 3) setOverlay('Buffering...', { loading: true });
+    });
+    retryBtn.addEventListener('click', () => start(currentEmbed));
+    loadBtn.addEventListener('click', () => start(embedInput.value.trim()));
+    embedInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') start(embedInput.value.trim());
+    });
+    qualitySel.addEventListener('change', () => {
+      if (hls) hls.currentLevel = Number(qualitySel.value);
+    });
+    clearLogs.addEventListener('click', () => { logsEl.value = ''; });
+
+    log('Player listo (v5.1 · native loader + proxy rewrite).', 'ok');
+    const params = new URLSearchParams(location.search);
+    if (params.get('src')) {
+      embedInput.value = params.get('src');
+      start(params.get('src'));
+    }
+  </script>
+</body>
+</html>

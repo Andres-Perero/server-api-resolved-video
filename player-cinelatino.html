@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>CineLatino Player (Test)</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0a;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #fff;
+    padding: 20px;
+  }
+  h1 { margin-bottom: 6px; font-size: 22px; color: #e50914; }
+  .subtitle { color: #777; font-size: 13px; margin-bottom: 18px; text-align: center; }
+  
+  .box {
+    width: 100%;
+    max-width: 960px;
+    margin-bottom: 12px;
+  }
+
+  .input-container {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+    margin-bottom: 10px;
+  }
+  input[type="text"] {
+    flex: 1;
+    padding: 11px 14px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    background: #111;
+    color: #fff;
+    font-size: 13px;
+    outline: none;
+  }
+  input[type="text"]:focus { border-color: #e50914; }
+  
+  #status {
+    padding: 10px 16px;
+    background: #1a1a1a;
+    border-radius: 8px;
+    font-size: 13px;
+    color: #888;
+    word-break: break-all;
+  }
+  #status.ok { color: #22c55e; }
+  #status.error { color: #ef4444; }
+  #status.warn { color: #f59e0b; }
+  
+  #video {
+    width: 100%;
+    max-width: 960px;
+    border-radius: 12px;
+    background: #000;
+    aspect-ratio: 16/9;
+    margin-top: 10px;
+  }
+  
+  #logs {
+    margin-top: 14px;
+    padding: 14px;
+    background: #111;
+    border-radius: 8px;
+    width: 100%;
+    max-width: 960px;
+    max-height: 220px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 12px;
+    color: #666;
+  }
+  #logs .log-ok { color: #22c55e; }
+  #logs .log-err { color: #ef4444; }
+  #logs .log-info { color: #3b82f6; }
+  #logs .log-warn { color: #f59e0b; }
+  
+  .btn {
+    padding: 11px 16px;
+    background: #e50914;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .btn:hover { background: #b20710; }
+  .btn:disabled { background: #444; cursor: not-allowed; }
+  .btn-secondary { background: #333; }
+  .btn-secondary:hover { background: #444; }
+
+  .info-box {
+    width: 100%;
+    max-width: 960px;
+    margin-top: 14px;
+    padding: 14px 16px;
+    background: #111;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #aaa;
+    line-height: 1.55;
+  }
+  .info-box strong { color: #e50914; }
+  .info-box code {
+    background: #222;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 11px;
+  }
+  .warning {
+    background: #2a1a00;
+    border: 1px solid #664400;
+    color: #f59e0b;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    margin-bottom: 12px;
+    width: 100%;
+    max-width: 960px;
+  }
+</style>
+</head>
+<body>
+
+<h1>🎬 CineLatino Player</h1>
+<div class="subtitle">Prueba de stream resuelto (MP4 vía OpenDrive)</div>
+
+<div class="warning" id="fileWarning" style="display:none;">
+  ⚠️ Estás abriendo el archivo con <code>file://</code>. Algunos navegadores bloquean el video por seguridad.<br>
+  Solución recomendada: sirve la carpeta con un servidor local<br>
+  <code>npx serve .</code> o <code>python -m http.server 8080</code> y abre <code>http://localhost:8080/player-cinelatino.html</code>
+</div>
+
+<div class="box">
+  <div class="input-container">
+    <input type="text" id="streamUrl" 
+      value="https://play.cinelatino.net//stream/?data=uIid9yo71BQQSn7mevrMeQ6va/arP9t8gxCH88P+PXNzrsVm9wBwkhkvcvpRMEo4jjqCn55JRau45Go7zMZQxq9UcqWBIDGBNYyD0jZnd/Da7b4gJI1RxC0iamX8Lg0vz6RdPg2WqEDkS3eZYuUvpOCzv92k7zZwjC/Yxxmne1t3j+plFpOmuPmxWYbUoG2WdnrFdfiHH85o/AI=" />
+  </div>
+  <div class="input-container">
+    <button class="btn" id="btnProxy" onclick="playWithProxy()">▶ Usar Proxy (recomendado)</button>
+    <button class="btn btn-secondary" onclick="playDirect()">Directo (puede fallar)</button>
+    <button class="btn btn-secondary" onclick="clearLogs()">Limpiar logs</button>
+  </div>
+</div>
+
+<div id="status" class="box">Listo. Usa "Usar Proxy" para mayor compatibilidad.</div>
+
+<video id="video" controls playsinline referrerpolicy="no-referrer"></video>
+
+<div class="info-box">
+  <strong>Cómo funciona:</strong><br>
+  1. La URL <code>/stream/?data=...</code> hace redirect → od.lk → web.opendrive.com (MP4 real)<br>
+  2. <strong>Usar Proxy</strong> manda esa URL a tu Cloudflare Worker para evitar CORS y problemas de referer.<br>
+  3. Si tu proxy no sigue bien los redirects, prueba poniendo la URL final de OpenDrive que te devuelva el script de resolve.
+</div>
+
+<div id="logs"></div>
+
+<script>
+(function() {
+  'use strict';
+
+  const PROXY_BASE = 'https://goodstream-proxy-render.ff15.workers.dev/?url=';
+
+  const HARDCODED = 'https://play.cinelatino.net//stream/?data=uIid9yo71BQQSn7mevrMeQ6va/arP9t8gxCH88P+PXNzrsVm9wBwkhkvcvpRMEo4jjqCn55JRau45Go7zMZQxq9UcqWBIDGBNYyD0jZnd/Da7b4gJI1RxC0iamX8Lg0vz6RdPg2WqEDkS3eZYuUvpOCzv92k7zZwjC/Yxxmne1t3j+plFpOmuPmxWYbUoG2WdnrFdfiHH85o/AI=';
+
+  const inputUrl = document.getElementById('streamUrl');
+  const video = document.getElementById('video');
+  const statusEl = document.getElementById('status');
+  const logs = document.getElementById('logs');
+  const fileWarning = document.getElementById('fileWarning');
+
+  // Detectar file://
+  if (location.protocol === 'file:') {
+    fileWarning.style.display = 'block';
+  }
+
+  function log(msg, type = 'info') {
+    const div = document.createElement('div');
+    div.className = 'log-' + type;
+    div.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+    logs.appendChild(div);
+    logs.scrollTop = logs.scrollHeight;
+  }
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = 'box ' + (cls || '');
+  }
+
+  function loadVideo(mediaUrl, label) {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+
+    log('Cargando: ' + label, 'info');
+    log('URL: ' + mediaUrl.substring(0, 110) + (mediaUrl.length > 110 ? '...' : ''), 'info');
+
+    setStatus('🚀 Cargando stream...', 'ok');
+    video.src = mediaUrl;
+
+    const playPromise = video.play();
+    if (playPromise !== undefined) {
+      playPromise.then(() => {
+        setStatus('▶️ Reproduciendo', 'ok');
+        log('▶️ Play iniciado', 'ok');
+      }).catch(e => {
+        log('Autoplay bloqueado o error: ' + e.message, 'warn');
+        setStatus('⏸️ Listo – presiona Play manualmente', 'warn');
+      });
+    }
+  }
+
+  window.playWithProxy = function() {
+    const url = (inputUrl.value.trim() || HARDCODED);
+    const proxied = PROXY_BASE + encodeURIComponent(url);
+    loadVideo(proxied, 'Vía Proxy Cloudflare');
+  };
+
+  window.playDirect = function() {
+    const url = (inputUrl.value.trim() || HARDCODED);
+    loadVideo(url, 'Directo (sin proxy)');
+  };
+
+  window.clearLogs = function() {
+    logs.innerHTML = '';
+  };
+
+  // Eventos
+  video.addEventListener('playing', () => log('▶️ Evento: PLAYING', 'ok'));
+  video.addEventListener('waiting', () => log('⏳ Buffering...', 'info'));
+  video.addEventListener('canplay', () => log('✅ canplay', 'ok'));
+  video.addEventListener('loadedmetadata', () => {
+    const dur = isFinite(video.duration) ? Math.round(video.duration) + 's' : '?';
+    log(`📐 ${video.videoWidth}x${video.videoHeight} | duración ~${dur}`, 'info');
+  });
+  video.addEventListener('error', () => {
+    const code = video.error ? video.error.code : '?';
+    const map = {
+      1: 'MEDIA_ERR_ABORTED',
+      2: 'MEDIA_ERR_NETWORK',
+      3: 'MEDIA_ERR_DECODE',
+      4: 'MEDIA_ERR_SRC_NOT_SUPPORTED'
+    };
+    log('❌ Error video (code ' + code + '): ' + (map[code] || 'Desconocido'), 'err');
+    setStatus('❌ Error al cargar. Prueba "Usar Proxy" o revisa que tu Worker funcione.', 'error');
+  });
+
+})();
+</script>
+</body>
+</html>

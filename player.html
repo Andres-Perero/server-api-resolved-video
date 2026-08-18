@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GoodStream Player + Worker Proxy</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh;
+      display: grid; place-items: center;
+      background: radial-gradient(circle at top, rgba(255,77,79,.16), transparent 35%), #070b10;
+      color: #e6edf3;
+      font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      padding: 20px;
+    }
+    .shell { width: min(1100px, 100%); }
+    h1 { margin: 0 0 4px; font-size: 1.4rem; }
+    .sub { color: #9fb2c8; margin-bottom: 14px; }
+    .player-box {
+      position: relative; aspect-ratio: 16 / 9;
+      background: #000; border: 1px solid rgba(255,255,255,.09);
+      border-radius: 18px; overflow: hidden;
+      box-shadow: 0 24px 70px rgba(0,0,0,.5);
+    }
+    video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+    .overlay {
+      position: absolute; inset: 0;
+      display: grid; place-content: center; justify-items: center; gap: 14px;
+      text-align: center; padding: 20px;
+      background: rgba(0,0,0,.72); backdrop-filter: blur(4px);
+      transition: opacity .2s;
+    }
+    .overlay.hidden { opacity: 0; pointer-events: none; }
+    .spinner {
+      width: 50px; height: 50px; border-radius: 50%;
+      border: 4px solid rgba(255,255,255,.22); border-top-color: #ff4d4f;
+      animation: spin .9s linear infinite;
+    }
+    .spinner[hidden], .retry[hidden] { display: none !important; }
+    .status { font-weight: 750; max-width: 60ch; }
+    .retry {
+      border: 0; cursor: pointer; background: #ff4d4f; color: #fff;
+      font-weight: 800; padding: 12px 18px; border-radius: 13px;
+    }
+    .panel {
+      margin-top: 14px;
+      background: rgba(255,255,255,.045);
+      border: 1px solid rgba(255,255,255,.09);
+      padding: 16px; border-radius: 18px;
+    }
+    label { font-weight: 750; display: block; margin-bottom: 6px; }
+    input, select {
+      width: 100%; padding: 10px 12px; border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: #0c1219; color: #fff; outline: none; font-family: inherit;
+    }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+    .button {
+      border: 0; cursor: pointer; background: #ff4d4f; color: #fff;
+      font-weight: 800; padding: 10px 16px; border-radius: 12px;
+    }
+    .hint {
+      margin-top: 10px; padding: 10px; border-radius: 10px;
+      background: rgba(255,193,7,.1); border: 1px solid rgba(255,193,7,.3);
+      color: #ffc107; font-size: .85rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <h1>🎬 GoodStream Player + Worker Proxy</h1>
+    <div class="sub">Usa tu Cloudflare Worker para proxy CORS + reescritura HLS</div>
+
+    <div class="player-box">
+      <video id="video" controls playsinline></video>
+      <div id="overlay" class="overlay">
+        <div id="spinner" class="spinner"></div>
+        <div id="status" class="status">Esperando URL...</div>
+        <button id="retryBtn" class="retry" hidden>Reintentar</button>
+      </div>
+    </div>
+
+    <section class="panel">
+      <label>URL del embed o .m3u8</label>
+      <div class="row">
+        <input id="srcInput" type="text"
+               placeholder="https://morencius.com/embed/x5hvx75vzo3w"
+               value="https://morencius.com/embed/x5hvx75vzo3w">
+        <button id="loadBtn" class="button">▶ Cargar</button>
+      </div>
+      <div class="hint">
+        ⚠️ <strong>Importante:</strong> Este HTML debe abrirse vía <code>http://localhost</code> (Live Server / Python / npx serve).
+        NO funciona con doble clic (<code>file://</code>).
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // ─── TU WORKER DE CLOUDFLARE ─────────────────────────────────────
+    const WORKER_BASE = 'https://goodstream-proxy-render.ff15.workers.dev';
+    const proxify = (url) => `${WORKER_BASE}/?url=${encodeURIComponent(url)}`;
+
+    const video    = document.getElementById('video');
+    const overlay  = document.getElementById('overlay');
+    const statusEl = document.getElementById('status');
+    const spinner  = document.getElementById('spinner');
+    const retryBtn = document.getElementById('retryBtn');
+    const srcInput = document.getElementById('srcInput');
+    const loadBtn  = document.getElementById('loadBtn');
+
+    let hls = null;
+    let lastUrl = '';
+
+    function setOverlay(text, opts = {}) {
+      if (opts.hide) { overlay.classList.add('hidden'); return; }
+      overlay.classList.remove('hidden');
+      statusEl.textContent = text;
+      spinner.hidden = !opts.loading;
+      retryBtn.hidden = !opts.retry;
+    }
+
+    // Custom loader HLS.js que pasa todo por tu worker
+    class WorkerLoader {
+      constructor(config) { this.config = config; this.xhr = null; }
+      destroy() { if (this.xhr) { this.xhr.abort(); this.xhr = null; } }
+      abort() { if (this.xhr) this.xhr.abort(); }
+      load(context, config, callbacks) {
+        const proxiedUrl = proxify(context.url);
+        const xhr = new XMLHttpRequest();
+        this.xhr = xhr;
+        xhr.open('GET', proxiedUrl, true);
+        xhr.responseType = context.responseType || 'arraybuffer';
+        xhr.timeout = config.timeout || 30000;
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            callbacks.onSuccess(
+              { data: xhr.response, code: xhr.status, text: xhr.responseText || '' },
+              { url: context.url }
+            );
+          } else {
+            callbacks.onError({ code: xhr.status, text: xhr.statusText }, { url: context.url });
+          }
+        };
+        xhr.onerror = () => callbacks.onError({ code: 0, text: 'Network error' }, { url: context.url });
+        xhr.ontimeout = () => callbacks.onError({ code: 0, text: 'Timeout' }, { url: context.url });
+        xhr.send();
+      }
+    }
+
+    async function extractM3u8FromEmbed(embedUrl) {
+      setOverlay('Extrayendo stream vía Worker...', { loading: true });
+      const res = await fetch(proxify(embedUrl));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const html = await res.text();
+
+      const patterns = [
+        /https?:\/\/[^"'\s]+\/stream\/[^"'\s]+\/master\.m3u8/,
+        /["']([^"']*\/stream\/[^"']*\/master\.m3u8)["']/,
+        /["'](\/stream\/[^"']+\/master\.m3u8)["']/,
+        /file\s*:\s*["']([^"']+\.m3u8)["']/,
+      ];
+
+      for (const re of patterns) {
+        const m = html.match(re);
+        if (m) {
+          let url = m[1] || m[0];
+          if (url.startsWith('/')) {
+            url = new URL(embedUrl).origin + url;
+          }
+          return url;
+        }
+      }
+      throw new Error('No se encontró .m3u8 en el embed');
+    }
+
+    async function loadSource(inputUrl) {
+      if (hls) { hls.destroy(); hls = null; }
+      video.removeAttribute('src');
+      video.load();
+
+      if (!inputUrl) { setOverlay('Esperando URL...'); return; }
+
+      let m3u8Url = inputUrl;
+      const isEmbed = /\/embed\/[a-z0-9]+/i.test(inputUrl) && !inputUrl.includes('.m3u8');
+
+      if (isEmbed) {
+        try {
+          m3u8Url = await extractM3u8FromEmbed(inputUrl);
+          console.log('🎯 .m3u8 extraído:', m3u8Url);
+        } catch (e) {
+          setOverlay('Error: ' + e.message, { retry: true });
+          return;
+        }
+      }
+
+      lastUrl = inputUrl;
+
+      if (!window.Hls || !Hls.isSupported()) {
+        if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = proxify(m3u8Url);
+          video.play().catch(() => setOverlay('', { hide: true }));
+          return;
+        }
+        setOverlay('HLS no soportado', { retry: true });
+        return;
+      }
+
+      setOverlay('Conectando al stream...', { loading: true });
+
+      hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        loader: WorkerLoader,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 600,
+      });
+
+      hls.loadSource(m3u8Url);
+      hls.attachMedia(video);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.play().catch(err => {
+          console.warn('Autoplay bloqueado:', err);
+          setOverlay('Pulsa ▶', { retry: true });
+        });
+      });
+
+      hls.on(Hls.Events.ERROR, (_e, data) => {
+        if (!data.fatal) return;
+        switch (data.type) {
+          case Hls.ErrorTypes.NETWORK_ERROR:
+            setOverlay('Error de red. Reintentando...', { loading: true });
+            setTimeout(() => hls.startLoad(), 2000);
+            break;
+          case Hls.ErrorTypes.MEDIA_ERROR:
+            hls.recoverMediaError();
+            break;
+          default:
+            setOverlay('Error fatal: ' + (data.details || ''), { retry: true });
+        }
+      });
+    }
+
+    video.addEventListener('play',    () => setOverlay('', { hide: true }));
+    video.addEventListener('playing', () => setOverlay('', { hide: true }));
+    video.addEventListener('waiting', () => setOverlay('Buffering...', { loading: true }));
+    video.addEventListener('error',   () => { if (lastUrl) setOverlay('Error', { retry: true }); });
+
+    retryBtn.addEventListener('click', () => loadSource(lastUrl));
+    loadBtn.addEventListener('click',  () => loadSource(srcInput.value.trim()));
+    srcInput.addEventListener('keydown', e => { if (e.key === 'Enter') loadSource(srcInput.value.trim()); });
+
+    // Auto-load si hay ?src= en la URL
+    const params = new URLSearchParams(location.search);
+    const paramSrc = params.get('src');
+    if (paramSrc) {
+      srcInput.value = paramSrc;
+      loadSource(paramSrc);
+    } else {
+      setOverlay('Listo. Pulsa ▶ Cargar');
+    }
+  </script>
+</body>
+</html>
