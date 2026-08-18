@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="referrer" content="no-referrer">
-<title>CineLatino Player (Test)</title>
+<title>CineLatino Player (Dinámico)</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -73,7 +73,7 @@
     border-radius: 8px;
     width: 100%;
     max-width: 960px;
-    max-height: 220px;
+    max-height: 240px;
     overflow-y: auto;
     font-family: monospace;
     font-size: 12px;
@@ -118,51 +118,34 @@
     border-radius: 4px;
     font-size: 11px;
   }
-  .warning {
-    background: #2a1a00;
-    border: 1px solid #664400;
-    color: #f59e0b;
-    padding: 10px 14px;
-    border-radius: 8px;
-    font-size: 12px;
-    margin-bottom: 12px;
-    width: 100%;
-    max-width: 960px;
-  }
 </style>
 </head>
 <body>
 
 <h1>🎬 CineLatino Player</h1>
-<div class="subtitle">Prueba de stream resuelto (MP4 vía OpenDrive)</div>
-
-<div class="warning" id="fileWarning" style="display:none;">
-  ⚠️ Estás abriendo el archivo con <code>file://</code>. Algunos navegadores bloquean el video por seguridad.<br>
-  Solución recomendada: sirve la carpeta con un servidor local<br>
-  <code>npx serve .</code> o <code>python -m http.server 8080</code> y abre <code>http://localhost:8080/player-cinelatino.html</code>
-</div>
+<div class="subtitle">Acepta embed.php o /stream/ — resuelve automáticamente</div>
 
 <div class="box">
   <div class="input-container">
     <input type="text" id="streamUrl" 
-      value="https://play.cinelatino.net//stream/?data=uIid9yo71BQQSn7mevrMeQ6va/arP9t8gxCH88P+PXNzrsVm9wBwkhkvcvpRMEo4jjqCn55JRau45Go7zMZQxq9UcqWBIDGBNYyD0jZnd/Da7b4gJI1RxC0iamX8Lg0vz6RdPg2WqEDkS3eZYuUvpOCzv92k7zZwjC/Yxxmne1t3j+plFpOmuPmxWYbUoG2WdnrFdfiHH85o/AI=" />
+      placeholder="Pega aquí el embed.php o el /stream/ de CineLatino"
+      value="https://play.cinelatino.net/embed.php?data=q96F7jdq2QFdRiT+YaaFCmyZHv+AVfJuknuxnKLnBU862LQx/ngQ8j0VRtFFAQQ1vReKm5RyaJei4lF7jNMvl/NBZaftETGGR62m8g5XH4O+3d48OvchsHQ3KHCfWHdfrdMmVmCDrzSIFynQdZY5tOPCiKzFiVx4yGmB6jfPay1q9eYSa8T04IOxA83w1X/HLVePaYaOKpRs4lkP6P142IWMlEuJYdN6XeauFiknKzRd1d+6VhrmDZVXROBtVvBi/PtnXCF8fPpWHnS53gjcmHjAQ3iTjqVD/WJLZCKHCHVGenrHtNk0NxE/7TIA054cf52fjtPjZUIyTKl4FJjJS5PrFOsOmVDZhbY=" />
   </div>
   <div class="input-container">
-    <button class="btn" id="btnProxy" onclick="playWithProxy()">▶ Usar Proxy (recomendado)</button>
-    <button class="btn btn-secondary" onclick="playDirect()">Directo (puede fallar)</button>
+    <button class="btn" id="btnPlay" onclick="startPlay()">▶ Reproducir</button>
     <button class="btn btn-secondary" onclick="clearLogs()">Limpiar logs</button>
   </div>
 </div>
 
-<div id="status" class="box">Listo. Usa "Usar Proxy" para mayor compatibilidad.</div>
+<div id="status" class="box">Pega una URL de CineLatino y pulsa Reproducir</div>
 
 <video id="video" controls playsinline referrerpolicy="no-referrer"></video>
 
 <div class="info-box">
-  <strong>Cómo funciona:</strong><br>
-  1. La URL <code>/stream/?data=...</code> hace redirect → od.lk → web.opendrive.com (MP4 real)<br>
-  2. <strong>Usar Proxy</strong> manda esa URL a tu Cloudflare Worker para evitar CORS y problemas de referer.<br>
-  3. Si tu proxy no sigue bien los redirects, prueba poniendo la URL final de OpenDrive que te devuelva el script de resolve.
+  <strong>Flujo automático:</strong><br>
+  1. Si pegas un <code>embed.php</code> → llama a <code>/api/cinelatino</code> para extraer el <code>/stream/</code><br>
+  2. Luego pasa esa URL por el Worker de Cloudflare (CORS + redirects OpenDrive)<br>
+  3. Si ya pegas un <code>/stream/</code> → salta el resolve y va directo al proxy
 </div>
 
 <div id="logs"></div>
@@ -171,20 +154,15 @@
 (function() {
   'use strict';
 
-  const PROXY_BASE = 'https://goodstream-proxy-render.ff15.workers.dev/?url=';
+  // ─── Configura aquí tus endpoints ───
+  const RESOLVE_API = 'https://server-api-resolved-video.vercel.app/api/cinelatino?url=';
+  const PROXY_BASE  = 'https://goodstream-proxy-render.ff15.workers.dev/?url=';
 
-  const HARDCODED = 'https://play.cinelatino.net//stream/?data=uIid9yo71BQQSn7mevrMeQ6va/arP9t8gxCH88P+PXNzrsVm9wBwkhkvcvpRMEo4jjqCn55JRau45Go7zMZQxq9UcqWBIDGBNYyD0jZnd/Da7b4gJI1RxC0iamX8Lg0vz6RdPg2WqEDkS3eZYuUvpOCzv92k7zZwjC/Yxxmne1t3j+plFpOmuPmxWYbUoG2WdnrFdfiHH85o/AI=';
-
-  const inputUrl = document.getElementById('streamUrl');
-  const video = document.getElementById('video');
-  const statusEl = document.getElementById('status');
-  const logs = document.getElementById('logs');
-  const fileWarning = document.getElementById('fileWarning');
-
-  // Detectar file://
-  if (location.protocol === 'file:') {
-    fileWarning.style.display = 'block';
-  }
+  const inputUrl  = document.getElementById('streamUrl');
+  const video     = document.getElementById('video');
+  const statusEl  = document.getElementById('status');
+  const logs      = document.getElementById('logs');
+  const btnPlay   = document.getElementById('btnPlay');
 
   function log(msg, type = 'info') {
     const div = document.createElement('div');
@@ -205,7 +183,7 @@
     video.load();
 
     log('Cargando: ' + label, 'info');
-    log('URL: ' + mediaUrl.substring(0, 110) + (mediaUrl.length > 110 ? '...' : ''), 'info');
+    log('URL final: ' + mediaUrl.substring(0, 120) + (mediaUrl.length > 120 ? '...' : ''), 'info');
 
     setStatus('🚀 Cargando stream...', 'ok');
     video.src = mediaUrl;
@@ -216,28 +194,72 @@
         setStatus('▶️ Reproduciendo', 'ok');
         log('▶️ Play iniciado', 'ok');
       }).catch(e => {
-        log('Autoplay bloqueado o error: ' + e.message, 'warn');
+        log('Autoplay bloqueado: ' + e.message, 'warn');
         setStatus('⏸️ Listo – presiona Play manualmente', 'warn');
       });
     }
   }
 
-  window.playWithProxy = function() {
-    const url = (inputUrl.value.trim() || HARDCODED);
-    const proxied = PROXY_BASE + encodeURIComponent(url);
-    loadVideo(proxied, 'Vía Proxy Cloudflare');
-  };
+  async function resolveIfNeeded(rawUrl) {
+    // Si ya es /stream/ no hace falta resolver
+    if (rawUrl.includes('/stream/')) {
+      log('Ya es URL de stream, saltando resolve', 'info');
+      return rawUrl;
+    }
 
-  window.playDirect = function() {
-    const url = (inputUrl.value.trim() || HARDCODED);
-    loadVideo(url, 'Directo (sin proxy)');
+    // Es embed → llamar a la API
+    log('Detectado embed → resolviendo con API...', 'info');
+    setStatus('🔍 Resolviendo embed...', 'ok');
+
+    const apiUrl = RESOLVE_API + encodeURIComponent(rawUrl);
+    const res = await fetch(apiUrl);
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Error HTTP ' + res.status + ' en resolve');
+    }
+
+    const data = await res.json();
+
+    if (!data.success || !data.url) {
+      throw new Error(data.error || 'La API no devolvió URL válida');
+    }
+
+    log('✅ Stream resuelto: ' + data.url.substring(0, 90) + '...', 'ok');
+    return data.url;
+  }
+
+  window.startPlay = async function() {
+    const raw = (inputUrl.value || '').trim();
+    if (!raw) {
+      setStatus('❌ Pega una URL de CineLatino', 'error');
+      return;
+    }
+
+    logs.innerHTML = '';
+    btnPlay.disabled = true;
+
+    try {
+      // 1. Resolver si es necesario
+      const streamUrl = await resolveIfNeeded(raw);
+
+      // 2. Pasar por el proxy de Cloudflare
+      const proxied = PROXY_BASE + encodeURIComponent(streamUrl);
+      loadVideo(proxied, 'Vía Proxy Cloudflare');
+
+    } catch (err) {
+      setStatus('❌ ' + err.message, 'error');
+      log('Error: ' + err.message, 'err');
+    } finally {
+      btnPlay.disabled = false;
+    }
   };
 
   window.clearLogs = function() {
     logs.innerHTML = '';
   };
 
-  // Eventos
+  // Eventos del video
   video.addEventListener('playing', () => log('▶️ Evento: PLAYING', 'ok'));
   video.addEventListener('waiting', () => log('⏳ Buffering...', 'info'));
   video.addEventListener('canplay', () => log('✅ canplay', 'ok'));
@@ -254,7 +276,7 @@
       4: 'MEDIA_ERR_SRC_NOT_SUPPORTED'
     };
     log('❌ Error video (code ' + code + '): ' + (map[code] || 'Desconocido'), 'err');
-    setStatus('❌ Error al cargar. Prueba "Usar Proxy" o revisa que tu Worker funcione.', 'error');
+    setStatus('❌ Error al cargar el video', 'error');
   });
 
 })();

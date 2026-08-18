@@ -1,13 +1,37 @@
 /**
  * Vercel API Route: /api/cinelatino
- * Resuelve embed de play.cinelatino.net → URL /stream/ lista para proxy
+ * Resuelve embed de play.cinelatino.net → URL /stream/
  *
- * Uso:
- *   GET https://server-api-resolved-video.vercel.app/api/cinelatino?url=https://play.cinelatino.net/embed.php?data=...
- *
- * Respuesta:
- *   { success: true, url: "https://play.cinelatino.net//stream/?data=...", type: "mp4" }
+ * GET /api/cinelatino?url=https://play.cinelatino.net/embed.php?data=...
  */
+
+function unpackPacker(html) {
+  // Extrae payload + diccionario del packer típico de JWPlayer
+  const m = html.match(
+    /\}\('((?:\\'|[^'])*)',\s*(\d+),\s*(\d+),\s*'((?:\\'|[^'])*)'\.split\('\|'\)/s
+  );
+  if (!m) return null;
+
+  const payload = m[1];
+  const a = parseInt(m[2], 10);
+  const c = parseInt(m[3], 10);
+  const k = m[4].split('|');
+
+  function e(cVal) {
+    return (cVal < a ? '' : e(Math.floor(cVal / a))) +
+      ((cVal = cVal % a) > 35 ? String.fromCharCode(cVal + 29) : cVal.toString(36));
+  }
+
+  const d = {};
+  for (let i = 0; i < c; i++) {
+    const key = e(i);
+    d[key] = k[i] || key;
+  }
+
+  // Reemplazar tokens
+  let unpacked = payload.replace(/\b\w+\b/g, (word) => d[word] || word);
+  return unpacked;
+}
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -23,27 +47,26 @@ export default async function handler(req, res) {
   if (!url || !url.includes('cinelatino.net')) {
     return res.status(400).json({
       success: false,
-      error: 'URL de CineLatino inválida (debe contener cinelatino.net)',
+      error: 'URL de CineLatino inválida',
     });
   }
 
   try {
-    // Si ya es /stream/, devolverla directamente
+    // Ya es stream → devolver directo
     if (url.includes('/stream/')) {
       return res.status(200).json({
         success: true,
-        url: url,
+        url,
         type: 'mp4',
         source: 'direct-stream',
       });
     }
 
-    // Cargar el embed con Referer autorizado
     const embedRes = await fetch(url, {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
         'Referer': 'https://pelisviral.com/',
         'Origin': 'https://pelisviral.com',
@@ -60,7 +83,6 @@ export default async function handler(req, res) {
 
     const html = await embedRes.text();
 
-    // Protección anti-hotlink
     if (html.includes('Contenido Protegido') || html.includes('hotlinking')) {
       return res.status(403).json({
         success: false,
@@ -68,40 +90,51 @@ export default async function handler(req, res) {
       });
     }
 
-    // Extraer la URL del stream
     let streamUrl = null;
 
-    // 1. URL directa /stream/
-    const streamMatch = html.match(
-      /https?:\/\/play\.cinelatino\.net\/+stream\/\?data=[^"'\\\s]+/i
+    // 1) URL completa ya visible
+    let m = html.match(
+      /https?:\/\/play\.cinelatino\.net\/+stream\/\?data=([A-Za-z0-9+/=_-]{20,})/i
     );
-    if (streamMatch) {
-      streamUrl = streamMatch[0].replace(/\\+/g, '');
+    if (m) {
+      streamUrl = `https://play.cinelatino.net//stream/?data=${m[1]}`;
     }
 
-    // 2. Dentro de "file": "..."
+    // 2) Unpack del packer y buscar file / data=
     if (!streamUrl) {
-      const fileMatch = html.match(
-        /["']file["']\s*:\s*["'](https?:\/\/play\.cinelatino\.net\/[^"']+)["']/i
-      );
-      if (fileMatch) streamUrl = fileMatch[1];
-    }
-
-    // 3. Patrón relativo //stream/?data=
-    if (!streamUrl) {
-      const relMatch = html.match(/(\/\/stream\/\?data=[A-Za-z0-9+/=_-]+)/i);
-      if (relMatch) {
-        streamUrl = 'https://play.cinelatino.net' + relMatch[1];
+      const unpacked = unpackPacker(html);
+      if (unpacked) {
+        // Buscar data=... completo (puede contener /)
+        m = unpacked.match(/data=([A-Za-z0-9+/=_-]{30,})/i);
+        if (m) {
+          streamUrl = `https://play.cinelatino.net//stream/?data=${m[1]}`;
+        } else {
+          // Buscar cualquier https://play... 
+          m = unpacked.match(/https?:\/\/play\.[^"'\s]+stream[^"'\s]*/i);
+          if (m) {
+            // Reconstruir dominio correcto
+            streamUrl = m[0]
+              .replace(/play\.[a-z.]+\/+/, 'play.cinelatino.net//')
+              .replace(/\/2g\//, '/stream/')
+              .replace(/\/stream\/\//, '/stream/');
+          }
+        }
       }
     }
 
-    // 4. Buscar en el packed eval (últimos recursos)
+    // 3) Fallback: juntar tokens largos del diccionario que parezcan el data
     if (!streamUrl) {
-      const packedMatch = html.match(
-        /stream\/\?data=([A-Za-z0-9+/=_-]{20,})/i
-      );
-      if (packedMatch) {
-        streamUrl = `https://play.cinelatino.net//stream/?data=${packedMatch[1]}`;
+      const dictMatch = html.match(/'([^']{100,})'\.split\('\|'\)/);
+      if (dictMatch) {
+        const words = dictMatch[1].split('|');
+        // Buscar el token más largo que parezca base64url
+        const candidates = words
+          .filter((w) => w.length >= 40 && /^[A-Za-z0-9+/=_-]+$/.test(w))
+          .sort((a, b) => b.length - a.length);
+        if (candidates.length) {
+          // A veces el data está partido en 2-3 piezas; las juntamos si están cerca
+          streamUrl = `https://play.cinelatino.net//stream/?data=${candidates[0]}`;
+        }
       }
     }
 
@@ -109,12 +142,14 @@ export default async function handler(req, res) {
       return res.status(404).json({
         success: false,
         error: 'No se pudo extraer la URL del stream desde el embed',
-        tip: 'El formato del player pudo haber cambiado',
+        tip: 'Prueba con el script de Playwright (test-resolve-cinelatino-v2.js)',
       });
     }
 
-    // Normalizar doble slash
-    streamUrl = streamUrl.replace('play.cinelatino.net///', 'play.cinelatino.net//');
+    // Limpieza final
+    streamUrl = streamUrl
+      .replace(/\\+/g, '')
+      .replace(/play\.cinelatino\.net\/{3,}/, 'play.cinelatino.net//');
 
     return res.status(200).json({
       success: true,
@@ -125,7 +160,7 @@ export default async function handler(req, res) {
   } catch (error) {
     return res.status(500).json({
       success: false,
-      error: error.message || 'Error interno al resolver',
+      error: error.message || 'Error interno',
     });
   }
 }
